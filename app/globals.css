@@ -1,0 +1,75 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --bg: #ffffff;
+  --bg-deep: #f5f5f5;
+  --bg-panel: #fafafa;
+  --fg: #0a0a0a;
+  --fg-muted: #737373;
+  --fg-faint: #a3a3a3;
+  --border: rgba(0, 0, 0, 0.08);
+  --border-subtle: rgba(0, 0, 0, 0.04);
+  --surface: rgba(0, 0, 0, 0.03);
+  --surface-hover: rgba(0, 0, 0, 0.06);
+  --scrubber-bg: #f0f0f0;
+  --scrubber-empty: rgba(0, 0, 0, 0.06);
+  --controls-bg: #f5f5f5;
+  --frame-bg: #e8e8e8;
+  --btn-bg: rgba(0, 0, 0, 0.05);
+  --btn-hover: rgba(0, 0, 0, 0.08);
+  --scrollbar: rgba(0, 0, 0, 0.1);
+}
+
+:root.dark {
+  --bg: #000000;
+  --bg-deep: #050505;
+  --bg-panel: #0a0a0a;
+  --fg: #ffffff;
+  --fg-muted: #737373;
+  --fg-faint: #525252;
+  --border: rgba(255, 255, 255, 0.06);
+  --border-subtle: rgba(255, 255, 255, 0.04);
+  --surface: rgba(255, 255, 255, 0.04);
+  --surface-hover: rgba(255, 255, 255, 0.06);
+  --scrubber-bg: #080808;
+  --scrubber-empty: rgba(255, 255, 255, 0.03);
+  --controls-bg: #0a0a0a;
+  --frame-bg: #050505;
+  --btn-bg: rgba(255, 255, 255, 0.06);
+  --btn-hover: rgba(255, 255, 255, 0.1);
+  --scrollbar: rgba(255, 255, 255, 0.08);
+}
+
+@theme inline {
+  --color-background: var(--bg);
+  --color-foreground: var(--fg);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 4px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--scrollbar);
+  border-radius: 2px;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-geist-sans), system-ui, -apple-system, sans-serif;
+  overflow: hidden;
+}
