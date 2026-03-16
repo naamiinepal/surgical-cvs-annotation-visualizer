@@ -3,7 +3,12 @@
 Clone the repo
 
 ```bash
-git clone https://github.com/supremekhadka/surgical-cvs-annotation-visualizer.git
+git clone https://github.com/msrepo/surgical-cvs-annotation-visualizer.git
+```
+
+Install dependencies
+```bash
+npm i
 ```
 
 Run the development server:
