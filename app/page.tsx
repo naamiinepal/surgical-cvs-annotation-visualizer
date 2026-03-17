@@ -27,16 +27,14 @@ type VideoEntry = {
   id: string;
   name: string;
   frames: string[];
-  dirHandle: FileSystemDirectoryHandle;
 };
-
-const IMAGE_EXT = new Set([
-  ".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp",
-]);
 
 /* ═══════════════════════════════════════════════════════════════════
    Constants & Helpers
    ═══════════════════════════════════════════════════════════════════ */
+// Set this to the correct extension for your dataset images
+const DATASET_EXT = ".jpg"; 
+
 const CRITERIA = [
   { label: "C1", color: "#ef4444" },
   { label: "C2", color: "#22c55e" },
@@ -50,12 +48,6 @@ function rgba(hex: string, a: number) {
   return `rgba(${r},${g},${b},${a})`;
 }
 
-function ext(name: string) {
-  const i = name.lastIndexOf(".");
-  return i >= 0 ? name.slice(i).toLowerCase() : "";
-}
-
-// Robust CSV row parser to handle quoted arrays like "[0.0,0.0,0.0]"
 function parseCSVRow(text: string): string[] {
   const result: string[] = [];
   let current = "";
@@ -91,19 +83,14 @@ function parseCVS(str: string | undefined): CVSArray | null {
    ═══════════════════════════════════════════════════════════════════ */
 export default function Home() {
   /* ── state ─────────────────────────────────────────────────────── */
-  const [folderName, setFolderName] = useState("");
   const [videos, setVideos] = useState<VideoEntry[]>([]);
   const [annotations, setAnnotations] = useState<Annotations>({});
   const [vidIdx, setVidIdx] = useState(0);
   const [frameIdx, setFrameIdx] = useState(0);
-  const [loaded, setLoaded] = useState(false);
-  const [browsing, setBrowsing] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   
   const videoListRef = useRef<HTMLDivElement>(null);
-  const rootHandle = useRef<FileSystemDirectoryHandle | null>(null);
-  const blobCache = useRef<Map<string, string>>(new Map());
-  const [frameUrl, setFrameUrl] = useState("");
 
   /* ── theme ──────────────────────────────────────────────────────── */
   type Theme = "light" | "dark" | "system";
@@ -169,82 +156,22 @@ export default function Home() {
   const frame = video?.frames[frameIdx];
   const total = video?.frames.length ?? 0;
 
+  // Derive the URL based on the public directory structure
+  const frameUrl = (video && frame) ? `/dataset/all/${video.id}_${frame}${DATASET_EXT}` : "";
+
   const ann: FrameAnnotation = useMemo(() => {
     if (!video || !frame) return DEFAULT_ANN;
     return annotations[video.id]?.[frame] ?? DEFAULT_ANN;
   }, [annotations, video, frame]);
 
-  /* ── read image file → blob URL ────────────────────────────────── */
-  const getFrameUrl = useCallback(
-    async (v: VideoEntry, frameName: string): Promise<string> => {
-      const key = `${v.id}/${frameName}`;
-      const cached = blobCache.current.get(key);
-      if (cached) return cached;
-      try {
-        const fileHandle = await v.dirHandle.getFileHandle(frameName);
-        const file = await fileHandle.getFile();
-        const url = URL.createObjectURL(file);
-        blobCache.current.set(key, url);
-        return url;
-      } catch {
-        return "";
-      }
-    },
-    [],
-  );
-
-  /* ── load current frame ────────────────────────────────────────── */
+  /* ── auto-load dataset on mount ────────────────────────────────── */
   useEffect(() => {
-    if (!video || !frame) {
-      setFrameUrl("");
-      return;
-    }
-    let cancelled = false;
-    getFrameUrl(video, frame).then((url) => {
-      if (!cancelled) setFrameUrl(url);
-    });
-    return () => { cancelled = true; };
-  }, [video, frame, getFrameUrl]);
-
-  /* ── preload neighbour frames ──────────────────────────────────── */
-  useEffect(() => {
-    if (!video) return;
-    for (const d of [-1, 1]) {
-      const idx = frameIdx + d;
-      if (idx >= 0 && idx < video.frames.length) {
-        getFrameUrl(video, video.frames[idx]); 
-      }
-    }
-  }, [frameIdx, video, getFrameUrl]);
-
-  /* ── parse dataset folder ──────────────────────────────────────── */
-  const loadDataset = useCallback(
-    async (dirHandle: FileSystemDirectoryHandle) => {
+    async function loadDataset() {
       try {
-        let allHandle: FileSystemDirectoryHandle;
-        try {
-          allHandle = await dirHandle.getDirectoryHandle("train");
-        } catch {
-          throw new Error("Could not find 'train' directory in the selected folder.");
-        }
-
-        const validImages = new Map<string, string>();
-        for await (const entry of allHandle.values()) {
-          if (entry.kind === "file" && IMAGE_EXT.has(ext(entry.name))) {
-            const base = entry.name.substring(0, entry.name.lastIndexOf("."));
-            validImages.set(base, entry.name);
-          }
-        }
-
-        let csvHandle: FileSystemFileHandle;
-        try {
-          csvHandle = await dirHandle.getFileHandle("all_metadata.csv");
-        } catch {
-          throw new Error("Could not find 'all_metadata.csv' in the selected folder.");
-        }
+        const res = await fetch("/dataset/all_metadata.csv");
+        if (!res.ok) throw new Error("Could not load /dataset/all_metadata.csv");
         
-        const file = await csvHandle.getFile();
-        const csvText = await file.text();
+        const csvText = await res.text();
         const lines = csvText.trim().split("\n");
         if (lines.length < 2) throw new Error("CSV file is empty or missing data rows.");
 
@@ -252,20 +179,18 @@ export default function Home() {
         const hIdx: Record<string, number> = {};
         headers.forEach((h, i) => (hIdx[h.trim()] = i));
 
-        // Added "is_ds_keyframe" to required headers
         const requiredHeaders = ["vid", "frame", "is_ds_keyframe"];
         for (const rh of requiredHeaders) {
           if (!(rh in hIdx)) throw new Error(`Missing required CSV column: ${rh}`);
         }
 
         const parsedAnnotations: Annotations = {};
-        const vidToFrames: Record<string, { num: number; img: string }[]> = {};
+        const vidToFrames: Record<string, number[]> = {};
 
         for (let i = 1; i < lines.length; i++) {
           const row = parseCSVRow(lines[i].trim());
           if (row.length < 2) continue;
 
-          // Extract and check if the record is a keyframe
           const isKeyframeStr = row[hIdx["is_ds_keyframe"]]?.trim().toLowerCase();
           const isKeyframe = isKeyframeStr === "true" || isKeyframeStr === "1";
           
@@ -273,13 +198,9 @@ export default function Home() {
 
           const vid = row[hIdx["vid"]];
           const frameNum = row[hIdx["frame"]];
-          const baseName = `${vid}_${frameNum}`;
-
-          const imgName = validImages.get(baseName);
-          if (!imgName) continue;
 
           if (!vidToFrames[vid]) vidToFrames[vid] = [];
-          vidToFrames[vid].push({ num: parseInt(frameNum, 10), img: imgName });
+          vidToFrames[vid].push(parseInt(frameNum, 10));
 
           if (!parsedAnnotations[vid]) parsedAnnotations[vid] = {};
           
@@ -292,7 +213,7 @@ export default function Home() {
             ];
           }
 
-          parsedAnnotations[vid][imgName] = {
+          parsedAnnotations[vid][frameNum] = {
             avg,
             a1: parseCVS(row[hIdx["cvs_annotator_1"]]),
             a2: parseCVS(row[hIdx["cvs_annotator_2"]]),
@@ -302,63 +223,35 @@ export default function Home() {
 
         const vids: VideoEntry[] = Object.keys(vidToFrames).map((vid) => {
           const sorted = vidToFrames[vid]
-            .sort((a, b) => a.num - b.num)
-            .map((x) => x.img);
+            .sort((a, b) => a - b)
+            .map(String);
           return {
             id: vid,
             name: `Video ${vid}`,
             frames: sorted,
-            dirHandle: allHandle,
           };
         });
 
         vids.sort((a, b) => parseInt(a.id) - parseInt(b.id));
 
-        return { vids, parsedAnnotations };
+        if (vids.length === 0) {
+          throw new Error("No valid keyframes mapped from the CSV.");
+        }
+
+        setVideos(vids);
+        setAnnotations(parsedAnnotations);
+        setVidIdx(0);
+        setFrameIdx(0);
       } catch (err: any) {
-        throw err;
-      }
-    },
-    [],
-  );
-
-  /* ── open folder (browser File System Access API) ──────────────── */
-  const browseFolder = useCallback(async () => {
-    setBrowsing(true);
-    setError("");
-    try {
-      const dirHandle = await window.showDirectoryPicker({ mode: "read" });
-      rootHandle.current = dirHandle;
-
-      for (const url of blobCache.current.values()) URL.revokeObjectURL(url);
-      blobCache.current.clear();
-
-      const { vids, parsedAnnotations } = await loadDataset(dirHandle);
-
-      if (vids.length === 0) {
-        setError("No valid keyframes mapped between 'all' and 'all_metadata.csv'.");
-        setBrowsing(false);
-        return;
-      }
-
-      setFolderName(dirHandle.name);
-      setVideos(vids);
-      setAnnotations(parsedAnnotations);
-      setVidIdx(0);
-      setFrameIdx(0);
-      setLoaded(true);
-    } catch (e: unknown) {
-      if ((e as DOMException)?.name !== "AbortError") {
-        const msg =
-          typeof window.showDirectoryPicker !== "function"
-            ? "Your browser does not support the File System Access API. Use Chrome or Edge."
-            : (e as Error)?.message ?? "Failed to open folder";
-        setError(msg);
-        console.error("browseFolder error:", e);
+        setError(err.message || "Failed to load dataset");
+      } finally {
+        setLoading(false);
       }
     }
-    setBrowsing(false);
-  }, [loadDataset]);
+
+    loadDataset();
+  }, []);
+
 
   /* ── navigation ────────────────────────────────────────────────── */
   const goFrame = useCallback(
@@ -435,9 +328,9 @@ export default function Home() {
   );
 
   /* ═════════════════════════════════════════════════════════════════
-     Landing screen
+     Loading / Error Screen
      ═════════════════════════════════════════════════════════════════ */
-  if (!loaded) {
+  if (loading || error) {
     return (
       <div className="h-screen flex flex-col items-center justify-center gap-10" style={{ background: "var(--bg)", color: "var(--fg)" }}>
         <button
@@ -449,37 +342,20 @@ export default function Home() {
           <ThemeIcon size={14} />
         </button>
 
-        <div className="flex flex-col items-center gap-1.5">
-          <h1 className="text-5xl font-bold tracking-tighter">
-            <span className="opacity-40 mr-1">◆</span> CVS Dataset Visualizer
-          </h1>
-          <p className="text-[11px] uppercase tracking-[0.3em]" style={{ color: "var(--fg-muted)" }}>
-            Review Multi-Annotator Labels
-          </p>
-        </div>
-
         <div className="flex flex-col items-center gap-4">
-          <button
-            onClick={browseFolder}
-            disabled={browsing}
-            className="h-14 px-12 font-semibold rounded-lg text-sm disabled:opacity-50 disabled:cursor-wait transition-colors flex items-center gap-3 dark:bg-white dark:text-black dark:hover:bg-neutral-200 bg-black text-white hover:bg-neutral-800 active:bg-neutral-700 dark:active:bg-neutral-300"
-          >
-            <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-            </svg>
-            {browsing ? "Opening…" : "Open Folder"}
-          </button>
+          <h1 className="text-3xl font-bold tracking-tighter">
+            {error ? "Error Loading Dataset" : "Loading Dataset..."}
+          </h1>
           {error && (
-            <p className="text-xs text-red-400 max-w-md text-center">{error}</p>
+             <p className="text-sm text-red-500 max-w-md text-center bg-red-50 dark:bg-red-950/30 p-4 rounded-md">
+               {error}
+             </p>
           )}
-          <p className="text-[11px] mt-1" style={{ color: "var(--fg-faint)" }}>
-            Select root Endoscapes dataset folder 
-          </p>
-        </div>
-
-        <div className="flex items-center gap-8 text-[10px] uppercase tracking-widest mt-4" style={{ color: "var(--fg-faint)" }}>
-          <span>← → Navigate Frames</span>
-          <span>↑ ↓ Switch Videos</span>
+          {!error && (
+            <p className="text-[11px] uppercase tracking-[0.3em]" style={{ color: "var(--fg-muted)" }}>
+              Fetching from /public/dataset
+            </p>
+          )}
         </div>
       </div>
     );
@@ -498,21 +374,9 @@ export default function Home() {
 
         <div className="h-5 w-px" style={{ background: "var(--border)" }} />
 
-        <span className="text-[11px] font-mono truncate max-w-sm" style={{ color: "var(--fg-muted)" }} title={folderName}>
-          {folderName}
+        <span className="text-[11px] font-mono truncate max-w-sm" style={{ color: "var(--fg-muted)" }}>
+          /dataset
         </span>
-
-        <button
-          onClick={browseFolder}
-          disabled={browsing}
-          className="h-7 px-3 text-[11px] rounded disabled:opacity-40 transition-colors flex items-center gap-1.5"
-          style={{ background: "var(--btn-bg)", color: "var(--fg-muted)" }}
-        >
-          <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-          </svg>
-          {browsing ? "…" : "Change Folder"}
-        </button>
 
         <div className="ml-auto flex items-center gap-3">
           <button
@@ -667,11 +531,9 @@ export default function Home() {
                           <div
                             className="w-5 h-5 flex items-center justify-center text-[8px] font-bold rounded-full transition-all duration-150"
                             style={{
-                              // ALWAYS keep a border. Use the color if it has data, otherwise a visible neutral border.
                               border: `1px solid ${hasData ? c.color : "var(--border)"}`,
                               background: isActive && hasData ? c.color : "transparent",
                               color: isActive && hasData ? "#ffffff" : (hasData ? c.color : "var(--fg-muted)"),
-                              // Raise the lowest opacity from 0.1 to 0.4 so unfilled circles aren't lost
                               opacity: hasData ? (isActive ? 1 : 0.6) : 0.4,
                               boxShadow: isActive && hasData ? `0 0 8px ${rgba(c.color, 0.4)}` : "none",
                             }}
