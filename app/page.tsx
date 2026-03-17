@@ -223,9 +223,9 @@ export default function Home() {
       try {
         let allHandle: FileSystemDirectoryHandle;
         try {
-          allHandle = await dirHandle.getDirectoryHandle("all");
+          allHandle = await dirHandle.getDirectoryHandle("train");
         } catch {
-          throw new Error("Could not find 'all' directory in the selected folder.");
+          throw new Error("Could not find 'train' directory in the selected folder.");
         }
 
         const validImages = new Map<string, string>();
