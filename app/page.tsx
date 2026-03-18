@@ -34,6 +34,8 @@ const IMAGE_EXT = new Set([
   ".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp",
 ]);
 
+type AppMode = "single" | "compare";
+
 /* ═══════════════════════════════════════════════════════════════════
    Constants & Helpers
    ═══════════════════════════════════════════════════════════════════ */
@@ -55,7 +57,6 @@ function ext(name: string) {
   return i >= 0 ? name.slice(i).toLowerCase() : "";
 }
 
-// Robust CSV row parser to handle quoted arrays like "[0.0,0.0,0.0]"
 function parseCSVRow(text: string): string[] {
   const result: string[] = [];
   let current = "";
@@ -81,7 +82,7 @@ function parseCVS(str: string | undefined): CVSArray | null {
     const arr = JSON.parse(str);
     if (Array.isArray(arr) && arr.length === 3) return arr as CVSArray;
   } catch {
-    // silently fail and return null if badly formatted
+    // silently fail
   }
   return null;
 }
@@ -91,9 +92,13 @@ function parseCVS(str: string | undefined): CVSArray | null {
    ═══════════════════════════════════════════════════════════════════ */
 export default function Home() {
   /* ── state ─────────────────────────────────────────────────────── */
+  const [mode, setMode] = useState<AppMode>("single");
   const [folderName, setFolderName] = useState("");
   const [videos, setVideos] = useState<VideoEntry[]>([]);
+  
   const [annotations, setAnnotations] = useState<Annotations>({});
+  const [modelAnnotations, setModelAnnotations] = useState<Annotations>({});
+  
   const [vidIdx, setVidIdx] = useState(0);
   const [frameIdx, setFrameIdx] = useState(0);
   const [loaded, setLoaded] = useState(false);
@@ -174,6 +179,11 @@ export default function Home() {
     return annotations[video.id]?.[frame] ?? DEFAULT_ANN;
   }, [annotations, video, frame]);
 
+  const modAnn: FrameAnnotation = useMemo(() => {
+    if (!video || !frame) return DEFAULT_ANN;
+    return modelAnnotations[video.id]?.[frame] ?? DEFAULT_ANN;
+  }, [modelAnnotations, video, frame]);
+
   /* ── read image file → blob URL ────────────────────────────────── */
   const getFrameUrl = useCallback(
     async (v: VideoEntry, frameName: string): Promise<string> => {
@@ -217,148 +227,166 @@ export default function Home() {
     }
   }, [frameIdx, video, getFrameUrl]);
 
-  /* ── parse dataset folder ──────────────────────────────────────── */
-  const loadDataset = useCallback(
-    async (dirHandle: FileSystemDirectoryHandle) => {
-      try {
-        let allHandle: FileSystemDirectoryHandle;
-        try {
-          allHandle = await dirHandle.getDirectoryHandle("train");
-        } catch {
-          throw new Error("Could not find 'train' directory in the selected folder.");
-        }
+  /* ── parse dataset folder & csv ────────────────────────────────── */
+  const parseCSV = async (
+    file: File, 
+    validImages: Map<string, string>, 
+    isDatasetGT: boolean
+  ) => {
+    const csvText = await file.text();
+    const lines = csvText.trim().split("\n");
+    if (lines.length < 2) throw new Error(`CSV file ${file.name} is empty or missing data rows.`);
 
-        const validImages = new Map<string, string>();
-        for await (const entry of allHandle.values()) {
-          if (entry.kind === "file" && IMAGE_EXT.has(ext(entry.name))) {
-            const base = entry.name.substring(0, entry.name.lastIndexOf("."));
-            validImages.set(base, entry.name);
-          }
-        }
+    const headers = parseCSVRow(lines[0].trim());
+    const hIdx: Record<string, number> = {};
+    headers.forEach((h, i) => (hIdx[h.trim()] = i));
 
-        let csvHandle: FileSystemFileHandle;
-        try {
-          csvHandle = await dirHandle.getFileHandle("all_metadata.csv");
-        } catch {
-          throw new Error("Could not find 'all_metadata.csv' in the selected folder.");
-        }
-        
-        const file = await csvHandle.getFile();
-        const csvText = await file.text();
-        const lines = csvText.trim().split("\n");
-        if (lines.length < 2) throw new Error("CSV file is empty or missing data rows.");
+    const requiredHeaders = isDatasetGT ? ["vid", "frame", "is_ds_keyframe"] : ["vid", "frame"];
+    for (const rh of requiredHeaders) {
+      if (!(rh in hIdx)) throw new Error(`Missing required CSV column: ${rh} in ${file.name}`);
+    }
 
-        const headers = parseCSVRow(lines[0].trim());
-        const hIdx: Record<string, number> = {};
-        headers.forEach((h, i) => (hIdx[h.trim()] = i));
+    const parsedAnnotations: Annotations = {};
+    const vidToFrames: Record<string, { num: number; img: string }[]> = {};
 
-        // Added "is_ds_keyframe" to required headers
-        const requiredHeaders = ["vid", "frame", "is_ds_keyframe"];
-        for (const rh of requiredHeaders) {
-          if (!(rh in hIdx)) throw new Error(`Missing required CSV column: ${rh}`);
-        }
+    for (let i = 1; i < lines.length; i++) {
+      const row = parseCSVRow(lines[i].trim());
+      if (row.length < 2) continue;
 
-        const parsedAnnotations: Annotations = {};
-        const vidToFrames: Record<string, { num: number; img: string }[]> = {};
-
-        for (let i = 1; i < lines.length; i++) {
-          const row = parseCSVRow(lines[i].trim());
-          if (row.length < 2) continue;
-
-          // Extract and check if the record is a keyframe
-          const isKeyframeStr = row[hIdx["is_ds_keyframe"]]?.trim().toLowerCase();
-          const isKeyframe = isKeyframeStr === "true" || isKeyframeStr === "1";
-          
-          if (!isKeyframe) continue;
-
-          const vid = row[hIdx["vid"]];
-          const frameNum = row[hIdx["frame"]];
-          const baseName = `${vid}_${frameNum}`;
-
-          const imgName = validImages.get(baseName);
-          if (!imgName) continue;
-
-          if (!vidToFrames[vid]) vidToFrames[vid] = [];
-          vidToFrames[vid].push({ num: parseInt(frameNum, 10), img: imgName });
-
-          if (!parsedAnnotations[vid]) parsedAnnotations[vid] = {};
-          
-          let avg = parseCVS(row[hIdx["avg_cvs"]]);
-          if (!avg) {
-            avg = [
-              parseFloat(row[hIdx["C1"]]) || 0,
-              parseFloat(row[hIdx["C2"]]) || 0,
-              parseFloat(row[hIdx["C3"]]) || 0,
-            ];
-          }
-
-          parsedAnnotations[vid][imgName] = {
-            avg,
-            a1: parseCVS(row[hIdx["cvs_annotator_1"]]),
-            a2: parseCVS(row[hIdx["cvs_annotator_2"]]),
-            a3: parseCVS(row[hIdx["cvs_annotator_3"]]),
-          };
-        }
-
-        const vids: VideoEntry[] = Object.keys(vidToFrames).map((vid) => {
-          const sorted = vidToFrames[vid]
-            .sort((a, b) => a.num - b.num)
-            .map((x) => x.img);
-          return {
-            id: vid,
-            name: `Video ${vid}`,
-            frames: sorted,
-            dirHandle: allHandle,
-          };
-        });
-
-        vids.sort((a, b) => parseInt(a.id) - parseInt(b.id));
-
-        return { vids, parsedAnnotations };
-      } catch (err: any) {
-        throw err;
+      // Only filter by is_ds_keyframe if we are loading the ground truth dataset
+      if (isDatasetGT) {
+        const isKeyframeStr = row[hIdx["is_ds_keyframe"]]?.trim().toLowerCase();
+        const isKeyframe = isKeyframeStr === "true" || isKeyframeStr === "1";
+        if (!isKeyframe) continue;
       }
-    },
-    [],
-  );
 
-  /* ── open folder (browser File System Access API) ──────────────── */
-  const browseFolder = useCallback(async () => {
+      const vid = row[hIdx["vid"]];
+      const frameNum = row[hIdx["frame"]];
+      const baseName = `${vid}_${frameNum}`;
+
+      const imgName = validImages.get(baseName);
+      if (!imgName) continue; // skip if image doesn't exist
+
+      if (!vidToFrames[vid]) vidToFrames[vid] = [];
+      vidToFrames[vid].push({ num: parseInt(frameNum, 10), img: imgName });
+
+      if (!parsedAnnotations[vid]) parsedAnnotations[vid] = {};
+      
+      let avg = parseCVS(row[hIdx["avg_cvs"]]);
+      if (!avg) {
+        avg = [
+          parseFloat(row[hIdx["C1"]]) || 0,
+          parseFloat(row[hIdx["C2"]]) || 0,
+          parseFloat(row[hIdx["C3"]]) || 0,
+        ];
+      }
+
+      parsedAnnotations[vid][imgName] = {
+        avg,
+        a1: parseCVS(row[hIdx["cvs_annotator_1"]]),
+        a2: parseCVS(row[hIdx["cvs_annotator_2"]]),
+        a3: parseCVS(row[hIdx["cvs_annotator_3"]]),
+      };
+    }
+
+    return { parsedAnnotations, vidToFrames };
+  };
+
+/* ── open flow (browser File System Access API) ────────────────── */
+  const startSession = useCallback(async (selectedMode: AppMode) => {
     setBrowsing(true);
     setError("");
     try {
-      const dirHandle = await window.showDirectoryPicker({ mode: "read" });
-      rootHandle.current = dirHandle;
+      // 1. Alert & Pick Images Directory Directly
+      alert("Step 1: Select the folder containing your dataset images.");
+      const allHandle = await window.showDirectoryPicker({ mode: "read" });
+      
+      // If rootHandle is used elsewhere in your app, we just point it to the selected image folder now
+      rootHandle.current = allHandle; 
 
+      // 2. Cache images directly from the selected folder (no "train" subfolder needed)
+      const validImages = new Map<string, string>();
+      for await (const entry of (allHandle as any).values()) {
+        if (entry.kind === "file" && IMAGE_EXT.has(ext(entry.name))) {
+          const base = entry.name.substring(0, entry.name.lastIndexOf("."));
+          validImages.set(base, entry.name);
+        }
+      }
+
+      // 3. Prompt for Dataset Annotation CSV
+      alert("Step 2: Select the Ground Truth annotations CSV file.");
+      const [gtFileHandle] = await (window as any).showOpenFilePicker({
+        types: [{ description: 'Dataset Annotations CSV', accept: { 'text/csv': ['.csv'] } }],
+        multiple: false,
+        excludeAcceptAllOption: true,
+      });
+      const gtFile = await gtFileHandle.getFile();
+      const gtData = await parseCSV(gtFile, validImages, true);
+
+      // 4. Prompt for Model Annotation CSV if in compare mode
+      let modData = null;
+      if (selectedMode === "compare") {
+        alert("Step 3: Select the Model Prediction CSV file.");
+        const [modFileHandle] = await (window as any).showOpenFilePicker({
+          types: [{ description: 'Model Output CSV', accept: { 'text/csv': ['.csv'] } }],
+          multiple: false,
+          excludeAcceptAllOption: true,
+        });
+        const modFile = await modFileHandle.getFile();
+        modData = await parseCSV(modFile, validImages, false);
+      }
+
+      // Cleanup previous object URLs
       for (const url of blobCache.current.values()) URL.revokeObjectURL(url);
       blobCache.current.clear();
 
-      const { vids, parsedAnnotations } = await loadDataset(dirHandle);
+      // Consolidate Videos using GT data as the source of truth for frames
+      const vids: VideoEntry[] = Object.keys(gtData.vidToFrames).map((vid) => {
+        // Remove duplicates if any and sort
+        const uniqueFrames = Array.from(new Set(gtData.vidToFrames[vid].map((f: any) => f.img)));
+        const sorted = uniqueFrames.sort((a, b) => {
+            const numA = parseInt(a.split('_')[1], 10);
+            const numB = parseInt(b.split('_')[1], 10);
+            return numA - numB;
+        });
+
+        return {
+          id: vid,
+          name: `Video ${vid}`,
+          frames: sorted,
+          dirHandle: allHandle, // Now using allHandle directly
+        };
+      });
 
       if (vids.length === 0) {
-        setError("No valid keyframes mapped between 'all' and 'all_metadata.csv'.");
-        setBrowsing(false);
-        return;
+        throw new Error("No valid keyframes mapped between the images and the dataset CSV.");
       }
 
-      setFolderName(dirHandle.name);
+      vids.sort((a, b) => parseInt(a.id) - parseInt(b.id));
+
+      setFolderName(allHandle.name);
       setVideos(vids);
-      setAnnotations(parsedAnnotations);
+      setAnnotations(gtData.parsedAnnotations);
+      if (modData) setModelAnnotations(modData.parsedAnnotations);
+      
+      setMode(selectedMode);
       setVidIdx(0);
       setFrameIdx(0);
       setLoaded(true);
     } catch (e: unknown) {
       if ((e as DOMException)?.name !== "AbortError") {
-        const msg =
-          typeof window.showDirectoryPicker !== "function"
+        const msg = typeof (window as any).showDirectoryPicker !== "function"
             ? "Your browser does not support the File System Access API. Use Chrome or Edge."
-            : (e as Error)?.message ?? "Failed to open folder";
+            : (e as Error)?.message ?? "Failed to open folder/files";
         setError(msg);
-        console.error("browseFolder error:", e);
+        console.error("startSession error:", e);
+      } else {
+        // Added a quick log so you know when the user clicks "Cancel" on the alerts/pickers
+        console.log("User cancelled file/folder selection.");
       }
     }
     setBrowsing(false);
-  }, [loadDataset]);
+  }, []);
 
   /* ── navigation ────────────────────────────────────────────────── */
   const goFrame = useCallback(
@@ -454,32 +482,42 @@ export default function Home() {
             <span className="opacity-40 mr-1">◆</span> CVS Dataset Visualizer
           </h1>
           <p className="text-[11px] uppercase tracking-[0.3em]" style={{ color: "var(--fg-muted)" }}>
-            Review Multi-Annotator Labels
+            Review Annotations & Compare Models
           </p>
         </div>
 
         <div className="flex flex-col items-center gap-4">
-          <button
-            onClick={browseFolder}
-            disabled={browsing}
-            className="h-14 px-12 font-semibold rounded-lg text-sm disabled:opacity-50 disabled:cursor-wait transition-colors flex items-center gap-3 dark:bg-white dark:text-black dark:hover:bg-neutral-200 bg-black text-white hover:bg-neutral-800 active:bg-neutral-700 dark:active:bg-neutral-300"
-          >
-            <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-            </svg>
-            {browsing ? "Opening…" : "Open Folder"}
-          </button>
+          <div className="flex gap-4">
+            <button
+              onClick={() => startSession("single")}
+              disabled={browsing}
+              className="h-14 px-8 font-semibold rounded-lg text-sm disabled:opacity-50 disabled:cursor-wait transition-colors flex items-center gap-3 bg-neutral-100 text-black hover:bg-neutral-200 active:bg-neutral-300 dark:bg-neutral-800 dark:text-white dark:hover:bg-neutral-700"
+            >
+              <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+              </svg>
+              View Dataset (Single)
+            </button>
+            <button
+              onClick={() => startSession("compare")}
+              disabled={browsing}
+              className="h-14 px-8 font-semibold rounded-lg text-sm disabled:opacity-50 disabled:cursor-wait transition-colors flex items-center gap-3 bg-blue-600 text-white hover:bg-blue-700 active:bg-blue-800"
+            >
+              <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M8 7v8a2 2 0 002 2h6M8 7V5a2 2 0 012-2h4.586a1 1 0 01.707.293l4.414 4.414a1 1 0 01.293.707V15a2 2 0 01-2 2h-2M8 7H6a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2v-2" />
+              </svg>
+              Compare Model Output
+            </button>
+          </div>
+          
           {error && (
-            <p className="text-xs text-red-400 max-w-md text-center">{error}</p>
+            <p className="text-xs text-red-400 max-w-md text-center bg-red-400/10 p-2 rounded">{error}</p>
           )}
-          <p className="text-[11px] mt-1" style={{ color: "var(--fg-faint)" }}>
-            Select root Endoscapes dataset folder 
-          </p>
-        </div>
-
-        <div className="flex items-center gap-8 text-[10px] uppercase tracking-widest mt-4" style={{ color: "var(--fg-faint)" }}>
-          <span>← → Navigate Frames</span>
-          <span>↑ ↓ Switch Videos</span>
+          
+          <div className="text-[11px] mt-1 text-center" style={{ color: "var(--fg-faint)" }}>
+            <p>1. Select root dataset folder (containing 'train')</p>
+            <p>2. Select the relevant CSV files when prompted</p>
+          </div>
         </div>
       </div>
     );
@@ -488,12 +526,30 @@ export default function Home() {
   /* ═════════════════════════════════════════════════════════════════
      Main Viewer
      ═════════════════════════════════════════════════════════════════ */
+const infoRows = mode === "compare" 
+    ? [
+        { label: "GT AVG", data: ann.avg, isAvg: true },
+        { label: "GT A1", data: ann.a1, isAvg: false },
+        { label: "GT A2", data: ann.a2, isAvg: false },
+        { label: "GT A3", data: ann.a3, isAvg: false },
+        // { label: "MD AVG", data: modAnn.avg, isAvg: true },
+        { label: "Model", data: modAnn.a1, isAvg: false },
+        // { label: "MD A2", data: modAnn.a2, isAvg: false },
+        // { label: "MD A3", data: modAnn.a3, isAvg: false },
+      ]
+    : [
+        { label: "AVG", data: ann.avg, isAvg: true },
+        { label: "A1", data: ann.a1, isAvg: false },
+        { label: "A2", data: ann.a2, isAvg: false },
+        { label: "A3", data: ann.a3, isAvg: false },
+      ];
+
   return (
     <div className="h-screen flex flex-col select-none overflow-hidden" style={{ background: "var(--bg)", color: "var(--fg)" }}>
       {/* ── Header ─────────────────────────────────────────────── */}
       <header className="h-11 shrink-0 flex items-center gap-4 px-4" style={{ borderBottom: "1px solid var(--border)" }}>
-        <span className="text-xs font-bold tracking-tight shrink-0 opacity-70">
-          ◆ CVS Viewer
+        <span className="text-xs font-bold tracking-tight shrink-0 opacity-70 flex items-center gap-2">
+          ◆ CVS Viewer <span className="text-[9px] px-1.5 py-0.5 rounded bg-neutral-500/20">{mode.toUpperCase()} MODE</span>
         </span>
 
         <div className="h-5 w-px" style={{ background: "var(--border)" }} />
@@ -503,15 +559,15 @@ export default function Home() {
         </span>
 
         <button
-          onClick={browseFolder}
+          onClick={() => { setLoaded(false); setError(""); }}
           disabled={browsing}
           className="h-7 px-3 text-[11px] rounded disabled:opacity-40 transition-colors flex items-center gap-1.5"
           style={{ background: "var(--btn-bg)", color: "var(--fg-muted)" }}
         >
           <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+            <path strokeLinecap="round" strokeLinejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
           </svg>
-          {browsing ? "…" : "Change Folder"}
+          Back to Setup
         </button>
 
         <div className="ml-auto flex items-center gap-3">
@@ -578,7 +634,7 @@ export default function Home() {
                     </span>
                   </div>
 
-                  {/* Based on Average Annotations */}
+                  {/* Based on Average Annotations (GT) */}
                   <div className="flex items-center gap-1 mt-1.5">
                     {CRITERIA.map((c, ci) => (
                       <div
@@ -623,21 +679,18 @@ export default function Home() {
 
             {/* Comprehensive Annotators Data Stack */}
             <div 
-              className="absolute top-3 right-3 flex flex-col gap-2 p-3 rounded-lg shadow-sm backdrop-blur-md" 
+              className="absolute top-3 right-3 flex flex-col gap-1.5 p-3 rounded-lg shadow-sm backdrop-blur-md" 
               style={{ background: rgba("var(--surface)", 0.8), border: "1px solid var(--border)" }}
             >
-              {[
-                { label: "AVG", data: ann.avg, isAvg: true },
-                { label: "A1", data: ann.a1, isAvg: false },
-                { label: "A2", data: ann.a2, isAvg: false },
-                { label: "A3", data: ann.a3, isAvg: false },
-              ].map((row) => {
+              {infoRows.map((row) => {
                 const rowData = row.data || [0, 0, 0];
                 const hasData = row.data !== null;
 
+                const isModelStart = row.label === "Model";
+
                 return (
-                  <div key={row.label} className="flex items-center gap-3">
-                    <span className="text-[10px] font-bold w-6 tracking-wide" style={{ color: "var(--fg)" }}>
+                  <div key={row.label} className={`flex items-center gap-3 ${isModelStart ? "mt-2 pt-2 border-t border-neutral-500/20" : ""}`}>
+                    <span className="text-[10px] font-bold w-12 tracking-wide" style={{ color: "var(--fg)" }}>
                       {row.label}
                     </span>
                     <div className="flex gap-2">
@@ -655,7 +708,7 @@ export default function Home() {
                               background: isActive ? rgba(c.color, 0.1) : "transparent",
                               border: `1px solid ${isActive ? rgba(c.color, 0.5) : "var(--border)"}`,
                             }}
-                            title={`${c.label} Average: ${val.toFixed(2)}`}
+                            title={`${c.label} Score: ${val.toFixed(2)}`}
                           >
                             {Number(val).toFixed(2)}
                           </div>
@@ -667,11 +720,9 @@ export default function Home() {
                           <div
                             className="w-5 h-5 flex items-center justify-center text-[8px] font-bold rounded-full transition-all duration-150"
                             style={{
-                              // ALWAYS keep a border. Use the color if it has data, otherwise a visible neutral border.
                               border: `1px solid ${hasData ? c.color : "var(--border)"}`,
                               background: isActive && hasData ? c.color : "transparent",
                               color: isActive && hasData ? "#ffffff" : (hasData ? c.color : "var(--fg-muted)"),
-                              // Raise the lowest opacity from 0.1 to 0.4 so unfilled circles aren't lost
                               opacity: hasData ? (isActive ? 1 : 0.6) : 0.4,
                               boxShadow: isActive && hasData ? `0 0 8px ${rgba(c.color, 0.4)}` : "none",
                             }}
@@ -695,7 +746,7 @@ export default function Home() {
             </div>
           </div>
 
-          {/* ── Scrubber ─────────────────────────────────────────── */}
+          {/* ── Scrubber (Based on GT) ─────────────────────────────── */}
           <div className="h-5 shrink-0 flex items-center justify-center px-3" style={{ background: "var(--scrubber-bg)" }}>
             <div
               className="flex items-end gap-px w-full py-0.5"
