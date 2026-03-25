@@ -8,10 +8,13 @@ import {
   FrameAnnotation,
   VideoEntry,
   Theme,
+  ModelAnnotations,
+  ModelPrediction,
 } from "../lib/types";
 import { CRITERIA, IMAGE_EXT } from "../lib/constants";
-import { ext, parseCSVRow, parseCVS, rgba, parseCSV } from "../lib/helpers";
+import { ext, rgba, parseCSV, parseModelPredictionsCSV } from "../lib/helpers";
 import { ThemeIcon } from "@/components/ThemeIcon";
+import { Button } from "@/components/ui/button";
 
 type AppMode = "single" | "compare";
 
@@ -22,7 +25,9 @@ export default function Home() {
   const [videos, setVideos] = useState<VideoEntry[]>([]);
 
   const [annotations, setAnnotations] = useState<Annotations>({});
-  const [modelAnnotations, setModelAnnotations] = useState<Annotations>({});
+  const [modelAnnotations, setModelAnnotations] = useState<ModelAnnotations>({});
+  const [threshold, setThreshold] = useState(0.5);
+  const [showAll, setShowAll] = useState(false);
 
   const [vidIdx, setVidIdx] = useState(0);
   const [frameIdx, setFrameIdx] = useState(0);
@@ -72,23 +77,38 @@ export default function Home() {
   }, []);
 
   /* ── derived ───────────────────────────────────────────────────── */
-  const video = videos[vidIdx];
-  const frame = video?.frames[frameIdx];
-  const total = video?.frames.length ?? 0;
+  // Flat list of all frames across all videos
+  const allFrames = useMemo(() => {
+    const list: { vidId: string; frame: string; vidEntry: VideoEntry }[] = [];
+    for (const v of videos) {
+      for (const f of v.frames) {
+        list.push({ vidId: v.id, frame: f, vidEntry: v });
+      }
+    }
+    return list;
+  }, [videos]);
+
+  const video = showAll ? allFrames[frameIdx]?.vidEntry : videos[vidIdx];
+  const frame = showAll
+    ? allFrames[frameIdx]?.frame
+    : video?.frames[frameIdx];
+  const total = showAll ? allFrames.length : (video?.frames.length ?? 0);
+  const currentVidId = showAll ? allFrames[frameIdx]?.vidId : video?.id;
 
   const ann: FrameAnnotation = useMemo(() => {
-    if (!video || !frame) return DEFAULT_ANN;
-    return annotations[video.id]?.[frame] ?? DEFAULT_ANN;
-  }, [annotations, video, frame]);
+    if (!currentVidId || !frame) return DEFAULT_ANN;
+    return annotations[currentVidId]?.[frame] ?? DEFAULT_ANN;
+  }, [annotations, currentVidId, frame]);
 
-  const modAnn: FrameAnnotation = useMemo(() => {
-    if (!video || !frame) return DEFAULT_ANN;
-    return modelAnnotations[video.id]?.[frame] ?? DEFAULT_ANN;
-  }, [modelAnnotations, video, frame]);
+  const modAnn: ModelPrediction | null = useMemo(() => {
+    if (!currentVidId || !frame) return null;
+    return modelAnnotations[currentVidId]?.[frame] ?? null;
+  }, [modelAnnotations, currentVidId, frame]);
 
   /* ── read image file → blob URL ────────────────────────────────── */
   const getFrameUrl = useCallback(
-    async (v: VideoEntry, frameName: string): Promise<string> => {
+    async (v: VideoEntry | undefined, frameName: string): Promise<string> => {
+      if (!v) return "";
       const key = `${v.id}/${frameName}`;
       const cached = blobCache.current.get(key);
       if (cached) return cached;
@@ -182,7 +202,7 @@ export default function Home() {
           excludeAcceptAllOption: true,
         });
         const modFile = await modFileHandle.getFile();
-        modData = await parseCSV(modFile, validImages, false);
+        modData = await parseModelPredictionsCSV(modFile, validImages);
       }
 
       // Cleanup previous object URLs
@@ -246,21 +266,26 @@ export default function Home() {
   /* ── navigation ────────────────────────────────────────────────── */
   const goFrame = useCallback(
     (d: number) => {
-      if (!video) return;
-      setFrameIdx((i) => Math.max(0, Math.min(i + d, video.frames.length - 1)));
+      if (showAll) {
+        setFrameIdx((i) => Math.max(0, Math.min(i + d, allFrames.length - 1)));
+      } else {
+        if (!video) return;
+        setFrameIdx((i) => Math.max(0, Math.min(i + d, video.frames.length - 1)));
+      }
     },
-    [video],
+    [video, showAll, allFrames.length],
   );
 
   const goVideo = useCallback(
     (d: number) => {
+      if (showAll) return; // no video switching in all-frames mode
       setVidIdx((i) => {
         const n = Math.max(0, Math.min(i + d, videos.length - 1));
         if (n !== i) setFrameIdx(0);
         return n;
       });
     },
-    [videos.length],
+    [videos.length, showAll],
   );
 
   /* ── keyboard ──────────────────────────────────────────────────── */
@@ -347,7 +372,7 @@ export default function Home() {
 
         <div className="flex flex-col items-center gap-4">
           <div className="flex gap-4">
-            <button
+            <Button
               onClick={() => startSession("single")}
               disabled={browsing}
               className="h-14 px-8 font-semibold rounded-lg text-sm disabled:opacity-50 disabled:cursor-wait transition-colors flex items-center gap-3 bg-neutral-100 text-black hover:bg-neutral-200 active:bg-neutral-300 dark:bg-neutral-800 dark:text-white dark:hover:bg-neutral-700"
@@ -367,8 +392,8 @@ export default function Home() {
                 />
               </svg>
               View Dataset
-            </button>
-            <button
+            </Button>
+            <Button
               onClick={() => startSession("compare")}
               disabled={browsing}
               className="h-14 px-8 font-semibold rounded-lg text-sm disabled:opacity-50 disabled:cursor-wait transition-colors flex items-center gap-3  bg-neutral-100 text-black hover:bg-neutral-200 active:bg-neutral-300 dark:bg-neutral-800 dark:text-white dark:hover:bg-neutral-700"
@@ -388,14 +413,14 @@ export default function Home() {
                 />
               </svg>
               Compare Model Output
-            </button>
+            </Button>
             <Link href="/eda">
-              <button
+              <Button
                 disabled={browsing}
                 className="h-14 px-8 font-semibold rounded-lg text-sm disabled:opacity-50 disabled:cursor-wait transition-colors flex items-center gap-3 bg-blue-600 text-white hover:bg-blue-700 active:bg-blue-800"
               >
                 EDA
-              </button>
+              </Button>
             </Link>
           </div>
 
@@ -417,24 +442,18 @@ export default function Home() {
   /* ═════════════════════════════════════════════════════════════════
      Main Viewer
      ═════════════════════════════════════════════════════════════════ */
-  const infoRows =
-    mode === "compare"
-      ? [
-          { label: "GT AVG", data: ann.avg, isAvg: true },
-          { label: "GT A1", data: ann.a1, isAvg: false },
-          { label: "GT A2", data: ann.a2, isAvg: false },
-          { label: "GT A3", data: ann.a3, isAvg: false },
-          // { label: "MD AVG", data: modAnn.avg, isAvg: true },
-          { label: "Model", data: modAnn.a1, isAvg: false },
-          // { label: "MD A2", data: modAnn.a2, isAvg: false },
-          // { label: "MD A3", data: modAnn.a3, isAvg: false },
-        ]
-      : [
-          { label: "AVG", data: ann.avg, isAvg: true },
-          { label: "A1", data: ann.a1, isAvg: false },
-          { label: "A2", data: ann.a2, isAvg: false },
-          { label: "A3", data: ann.a3, isAvg: false },
-        ];
+  // Build GT annotator rows dynamically (only show annotators that have data)
+  const gtAnnotatorRows: { label: string; data: [number, number, number] | null; isAvg: boolean }[] = [
+    { label: mode === "compare" ? "GT AVG" : "AVG", data: ann.avg, isAvg: true },
+  ];
+  if (ann.a1) gtAnnotatorRows.push({ label: mode === "compare" ? "GT A1" : "A1", data: ann.a1, isAvg: false });
+  if (ann.a2) gtAnnotatorRows.push({ label: mode === "compare" ? "GT A2" : "A2", data: ann.a2, isAvg: false });
+  if (ann.a3) gtAnnotatorRows.push({ label: mode === "compare" ? "GT A3" : "A3", data: ann.a3, isAvg: false });
+
+  // Model prediction thresholded values
+  const modelThresholded: [number, number, number] | null = modAnn
+    ? [modAnn.c1 >= threshold ? 1 : 0, modAnn.c2 >= threshold ? 1 : 0, modAnn.c3 >= threshold ? 1 : 0]
+    : null;
 
   return (
     <div
@@ -490,6 +509,36 @@ export default function Home() {
         </button>
 
         <div className="ml-auto flex items-center gap-3">
+          {mode === "compare" && (
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] uppercase tracking-widest" style={{ color: "var(--fg-muted)" }}>
+                Threshold
+              </span>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.01"
+                value={threshold}
+                onChange={(e) => setThreshold(parseFloat(e.target.value))}
+                className="w-28 h-1 accent-blue-500 cursor-pointer"
+                style={{ accentColor: "#3b82f6" }}
+              />
+              <input
+                type="number"
+                min="0"
+                max="1"
+                step="0.001"
+                value={threshold}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value);
+                  if (!isNaN(v) && v >= 0 && v <= 1) setThreshold(v);
+                }}
+                className="w-16 h-6 text-[11px] text-center font-mono rounded border bg-transparent"
+                style={{ borderColor: "var(--border)", color: "var(--fg)" }}
+              />
+            </div>
+          )}
           <button
             onClick={cycleTheme}
             className="w-7 h-7 flex items-center justify-center rounded transition-colors"
@@ -508,22 +557,35 @@ export default function Home() {
           className="w-56 shrink-0 flex flex-col"
           style={{ borderRight: "1px solid var(--border)" }}
         >
+          {/* Segmented toggle: Videos / All */}
           <div
-            className="h-8 flex items-center justify-between px-4 shrink-0"
+            className="flex items-center px-3 py-1.5 gap-1 shrink-0"
             style={{ borderBottom: "1px solid var(--border-subtle)" }}
           >
-            <span
-              className="text-[10px] uppercase tracking-widest"
-              style={{ color: "var(--fg-muted)" }}
-            >
-              Videos
-            </span>
-            <span
-              className="text-[10px] tabular-nums"
-              style={{ color: "var(--fg-faint)" }}
-            >
-              {videos.length}
-            </span>
+            {(["videos", "all"] as const).map((tab) => {
+              const active = tab === "videos" ? !showAll : showAll;
+              return (
+                <button
+                  key={tab}
+                  onClick={() => {
+                    const next = tab === "all";
+                    if (next !== showAll) {
+                      setShowAll(next);
+                      setFrameIdx(0);
+                      setVidIdx(0);
+                    }
+                  }}
+                  className="flex-1 text-[10px] uppercase tracking-widest py-1 rounded transition-colors font-medium"
+                  style={{
+                    background: active ? "var(--surface)" : "transparent",
+                    color: active ? "var(--fg)" : "var(--fg-faint)",
+                    border: active ? "1px solid var(--border)" : "1px solid transparent",
+                  }}
+                >
+                  {tab === "videos" ? `Videos (${videos.length})` : `All (${allFrames.length})`}
+                </button>
+              );
+            })}
           </div>
 
           <div
@@ -547,62 +609,107 @@ export default function Home() {
           </div>
 
           <div className="flex-1 overflow-y-auto" ref={videoListRef}>
-            {videos.map((v, i) => {
-              const active = i === vidIdx;
-              const st = stats[i];
-              return (
-                <button
-                  key={v.id}
-                  data-active={active}
-                  onClick={() => {
-                    setVidIdx(i);
-                    setFrameIdx(0);
-                  }}
-                  className="w-full text-left px-4 py-2 transition-colors border-l-2"
-                  style={{
-                    borderColor: active ? "var(--fg)" : "transparent",
-                    background: active ? "var(--surface)" : undefined,
-                  }}
-                >
-                  <div className="flex items-center gap-2">
+            {showAll ? (
+              /* ── All frames flat list ─────────────────────── */
+              allFrames.map((entry, i) => {
+                const active = i === frameIdx;
+                const fa = annotations[entry.vidId]?.[entry.frame] ?? DEFAULT_ANN;
+                const hasAny = fa.avg[0] > 0 || fa.avg[1] > 0 || fa.avg[2] > 0;
+                return (
+                  <button
+                    key={`${entry.vidId}_${entry.frame}`}
+                    data-active={active}
+                    onClick={() => setFrameIdx(i)}
+                    className="w-full text-left px-3 py-1 transition-colors border-l-2 flex items-center gap-2"
+                    style={{
+                      borderColor: active ? "var(--fg)" : "transparent",
+                      background: active ? "var(--surface)" : undefined,
+                    }}
+                  >
+                    {/* Mini C1/C2/C3 dots */}
+                    <div className="flex gap-[3px] shrink-0">
+                      {CRITERIA.map((c, ci) => (
+                        <div
+                          key={ci}
+                          className="w-[6px] h-[6px] rounded-full"
+                          style={{
+                            background: fa.avg[ci] > 0 ? c.color : "var(--border-subtle)",
+                            opacity: fa.avg[ci] > 0 ? 1 : 0.4,
+                          }}
+                        />
+                      ))}
+                    </div>
                     <span
-                      className="text-[11px] truncate flex-1 font-mono"
+                      className="text-[10px] truncate flex-1 font-mono"
                       style={{
                         color: active ? "var(--fg)" : "var(--fg-muted)",
                         fontWeight: active ? 500 : 400,
                       }}
                     >
-                      {v.name}
+                      {entry.frame}
                     </span>
-                  </div>
-
-                  {/* Based on Average Annotations (GT) */}
-                  <div className="flex items-center gap-1 mt-1.5">
-                    {CRITERIA.map((c, ci) => (
-                      <div
-                        key={ci}
-                        className="h-[3px] flex-1 rounded-full overflow-hidden"
-                        style={{ background: "var(--border-subtle)" }}
+                  </button>
+                );
+              })
+            ) : (
+              /* ── Grouped by video ────────────────────────── */
+              videos.map((v, i) => {
+                const active = i === vidIdx;
+                const st = stats[i];
+                return (
+                  <button
+                    key={v.id}
+                    data-active={active}
+                    onClick={() => {
+                      setVidIdx(i);
+                      setFrameIdx(0);
+                    }}
+                    className="w-full text-left px-4 py-2 transition-colors border-l-2"
+                    style={{
+                      borderColor: active ? "var(--fg)" : "transparent",
+                      background: active ? "var(--surface)" : undefined,
+                    }}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span
+                        className="text-[11px] truncate flex-1 font-mono"
+                        style={{
+                          color: active ? "var(--fg)" : "var(--fg-muted)",
+                          fontWeight: active ? 500 : 400,
+                        }}
                       >
+                        {v.name}
+                      </span>
+                    </div>
+
+                    {/* Based on Average Annotations (GT) */}
+                    <div className="flex items-center gap-1 mt-1.5">
+                      {CRITERIA.map((c, ci) => (
                         <div
-                          className="h-full rounded-full transition-all duration-300"
-                          style={{
-                            width: `${v.frames.length > 0 ? (st.counts[ci] / v.frames.length) * 100 : 0}%`,
-                            background: c.color,
-                          }}
-                        />
-                      </div>
-                    ))}
-                    <span
-                      className="text-[9px] ml-1 tabular-nums w-6 text-right shrink-0"
-                      style={{ color: "var(--fg-faint)" }}
-                    >
-                      {v.frames.length}
-                    </span>
-                  </div>
-                </button>
-              );
-            })}
+                          key={ci}
+                          className="h-[3px] flex-1 rounded-full overflow-hidden"
+                          style={{ background: "var(--border-subtle)" }}
+                        >
+                          <div
+                            className="h-full rounded-full transition-all duration-300"
+                            style={{
+                              width: `${v.frames.length > 0 ? (st.counts[ci] / v.frames.length) * 100 : 0}%`,
+                              background: c.color,
+                            }}
+                          />
+                        </div>
+                      ))}
+                      <span
+                        className="text-[9px] ml-1 tabular-nums w-6 text-right shrink-0"
+                        style={{ color: "var(--fg-faint)" }}
+                      >
+                        {v.frames.length}
+                      </span>
+                    </div>
+                  </button>
+                );
+              })
+            )}
           </div>
         </aside>
 
@@ -625,29 +732,23 @@ export default function Home() {
               <span className="text-neutral-700 text-sm">No frame</span>
             )}
 
-            {/* Comprehensive Annotators Data Stack */}
+            {/* Annotation Overlay */}
             <div
-              className="absolute top-3 right-3 flex flex-col gap-1.5 p-3 rounded-lg shadow-sm backdrop-blur-md"
+              className="absolute top-3 right-3 flex flex-col gap-1 p-3 rounded-xl shadow-lg backdrop-blur-xl"
               style={{
-                background: rgba("var(--surface)", 0.8),
-                border: "1px solid var(--border)",
+                background: "rgba(0,0,0,0.75)",
+                border: "1px solid rgba(255,255,255,0.1)",
+                minWidth: 200,
               }}
             >
-              {infoRows.map((row) => {
+              {/* GT Annotator Rows */}
+              {gtAnnotatorRows.map((row) => {
                 const rowData = row.data || [0, 0, 0];
                 const hasData = row.data !== null;
 
-                const isModelStart = row.label === "Model";
-
                 return (
-                  <div
-                    key={row.label}
-                    className={`flex items-center gap-3 ${isModelStart ? "mt-2 pt-2 border-t border-neutral-500/20" : ""}`}
-                  >
-                    <span
-                      className="text-[10px] font-bold w-12 tracking-wide"
-                      style={{ color: "var(--fg)" }}
-                    >
+                  <div key={row.label} className="flex items-center gap-3 py-0.5">
+                    <span className="text-[10px] font-bold w-14 tracking-wide text-neutral-300">
                       {row.label}
                     </span>
                     <div className="flex gap-2">
@@ -659,13 +760,11 @@ export default function Home() {
                           return (
                             <div
                               key={ci}
-                              className="w-8 py-0.5 text-center text-[9px] font-mono rounded transition-colors"
+                              className="w-9 py-0.5 text-center text-[10px] font-mono rounded transition-colors"
                               style={{
-                                color: isActive ? c.color : "var(--fg-faint)",
-                                background: isActive
-                                  ? rgba(c.color, 0.1)
-                                  : "transparent",
-                                border: `1px solid ${isActive ? rgba(c.color, 0.5) : "var(--border)"}`,
+                                color: isActive ? c.color : "rgba(255,255,255,0.3)",
+                                background: isActive ? rgba(c.color, 0.15) : "transparent",
+                                border: `1px solid ${isActive ? rgba(c.color, 0.6) : "rgba(255,255,255,0.1)"}`,
                               }}
                               title={`${c.label} Score: ${val.toFixed(2)}`}
                             >
@@ -675,31 +774,17 @@ export default function Home() {
                         }
 
                         return (
-                          <div
-                            key={ci}
-                            className="w-8 flex justify-center items-center"
-                          >
+                          <div key={ci} className="w-9 flex justify-center items-center">
                             <div
                               className="w-5 h-5 flex items-center justify-center text-[8px] font-bold rounded-full transition-all duration-150"
                               style={{
-                                border: `1px solid ${hasData ? c.color : "var(--border)"}`,
-                                background:
-                                  isActive && hasData ? c.color : "transparent",
-                                color:
-                                  isActive && hasData
-                                    ? "#ffffff"
-                                    : hasData
-                                      ? c.color
-                                      : "var(--fg-muted)",
+                                border: `1.5px solid ${hasData ? c.color : "rgba(255,255,255,0.15)"}`,
+                                background: isActive && hasData ? c.color : "transparent",
+                                color: isActive && hasData ? "#fff" : hasData ? c.color : "rgba(255,255,255,0.3)",
                                 opacity: hasData ? (isActive ? 1 : 0.6) : 0.4,
-                                boxShadow:
-                                  isActive && hasData
-                                    ? `0 0 8px ${rgba(c.color, 0.4)}`
-                                    : "none",
+                                boxShadow: isActive && hasData ? `0 0 10px ${rgba(c.color, 0.5)}` : "none",
                               }}
-                              title={
-                                hasData ? `${c.label}: ${val}` : "Not annotated"
-                              }
+                              title={hasData ? `${c.label}: ${val}` : "Not annotated"}
                             >
                               {c.label}
                             </div>
@@ -710,6 +795,66 @@ export default function Home() {
                   </div>
                 );
               })}
+
+              {/* Model Prediction Row */}
+              {mode === "compare" && (
+                <>
+                  <div className="border-t border-white/10 my-1" />
+                  {/* Probabilities */}
+                  <div className="flex items-center gap-3 py-0.5">
+                    <span className="text-[10px] font-bold w-14 tracking-wide text-blue-300">
+                      Prob
+                    </span>
+                    <div className="flex gap-2">
+                      {CRITERIA.map((c, ci) => {
+                        const prob = modAnn ? [modAnn.c1, modAnn.c2, modAnn.c3][ci] : 0;
+                        return (
+                          <div
+                            key={ci}
+                            className="w-9 py-0.5 text-center text-[10px] font-mono rounded transition-colors"
+                            style={{
+                              color: prob > 0 ? c.color : "rgba(255,255,255,0.3)",
+                              background: prob > 0 ? rgba(c.color, 0.15) : "transparent",
+                              border: `1px solid ${prob > 0 ? rgba(c.color, 0.6) : "rgba(255,255,255,0.1)"}`,
+                            }}
+                            title={`${c.label} Probability: ${prob.toFixed(4)}`}
+                          >
+                            {prob.toFixed(2)}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  {/* Thresholded */}
+                  <div className="flex items-center gap-3 py-0.5">
+                    <span className="text-[10px] font-bold w-14 tracking-wide text-blue-300">
+                      Model
+                    </span>
+                    <div className="flex gap-2">
+                      {CRITERIA.map((c, ci) => {
+                        const isActive = modelThresholded ? modelThresholded[ci] > 0 : false;
+                        return (
+                          <div key={ci} className="w-9 flex justify-center items-center">
+                            <div
+                              className="w-5 h-5 flex items-center justify-center text-[8px] font-bold rounded-full transition-all duration-150"
+                              style={{
+                                border: `1.5px solid ${modAnn ? c.color : "rgba(255,255,255,0.15)"}`,
+                                background: isActive ? c.color : "transparent",
+                                color: isActive ? "#fff" : modAnn ? c.color : "rgba(255,255,255,0.3)",
+                                opacity: modAnn ? (isActive ? 1 : 0.6) : 0.4,
+                                boxShadow: isActive ? `0 0 10px ${rgba(c.color, 0.5)}` : "none",
+                              }}
+                              title={modAnn ? `${c.label}: ${isActive ? "Yes" : "No"} (t=${threshold})` : "No prediction"}
+                            >
+                              {c.label}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
 
             <div className="absolute top-3 left-3 flex gap-2">
@@ -726,11 +871,17 @@ export default function Home() {
             </div>
           </div>
 
-          {/* ── Scrubber (Based on GT) ─────────────────────────────── */}
+          {/* ── Scrubber: GT Annotations ─────────────────────────── */}
           <div
-            className="h-5 shrink-0 flex items-center justify-center px-3"
-            style={{ background: "var(--scrubber-bg)" }}
+            className="shrink-0 flex items-center px-3"
+            style={{
+              background: "var(--scrubber-bg)",
+              height: mode === "compare" ? 16 : 20,
+            }}
           >
+            {mode === "compare" && (
+              <span className="text-[8px] uppercase tracking-widest shrink-0 w-8 text-center" style={{ color: "var(--fg-faint)" }}>GT</span>
+            )}
             <div
               className="flex items-end gap-px w-full py-0.5"
               style={{
@@ -743,8 +894,10 @@ export default function Home() {
                 margin: "0 auto",
               }}
             >
-              {video?.frames.map((f, i) => {
-                const fa = annotations[video.id]?.[f] ?? DEFAULT_ANN;
+              {(showAll ? allFrames : (video?.frames ?? []).map(f => ({ vidId: video!.id, frame: f }))).map((entry, i) => {
+                const f = typeof entry === "string" ? entry : entry.frame;
+                const vid = typeof entry === "string" ? video!.id : entry.vidId;
+                const fa = annotations[vid]?.[f] ?? DEFAULT_ANN;
                 const cur = i === frameIdx;
                 const hasAny = fa.avg[0] > 0 || fa.avg[1] > 0 || fa.avg[2] > 0;
                 return (
@@ -776,6 +929,72 @@ export default function Home() {
               })}
             </div>
           </div>
+
+          {/* ── Scrubber: Model Predictions (compare mode only) ──── */}
+          {mode === "compare" && (
+            <div
+              className="shrink-0 flex items-center px-3"
+              style={{
+                background: "var(--scrubber-bg)",
+                height: 16,
+                borderTop: "1px solid var(--border-subtle)",
+              }}
+            >
+              <span className="text-[8px] uppercase tracking-widest shrink-0 w-8 text-center" style={{ color: "var(--fg-faint)" }}>MD</span>
+              <div
+                className="flex items-end gap-px w-full py-0.5"
+                style={{
+                  maxWidth:
+                    total <= 100
+                      ? `${total * 10}px`
+                      : total <= 300
+                        ? `${total * 5}px`
+                        : "100%",
+                  margin: "0 auto",
+                }}
+              >
+                {(showAll ? allFrames : (video?.frames ?? []).map(f => ({ vidId: video!.id, frame: f }))).map((entry, i) => {
+                  const f = typeof entry === "string" ? entry : entry.frame;
+                  const vid = typeof entry === "string" ? video!.id : entry.vidId;
+                  const mp = modelAnnotations[vid]?.[f];
+                  const cur = i === frameIdx;
+                  const probs = mp ? [mp.c1, mp.c2, mp.c3] : [0, 0, 0];
+                  const threshed: [number, number, number] = [
+                    probs[0] >= threshold ? 1 : 0,
+                    probs[1] >= threshold ? 1 : 0,
+                    probs[2] >= threshold ? 1 : 0,
+                  ];
+                  const hasAny = threshed[0] > 0 || threshed[1] > 0 || threshed[2] > 0;
+                  return (
+                    <div
+                      key={i}
+                      className="flex-1 cursor-pointer flex flex-col rounded-[1px] overflow-hidden transition-all duration-100"
+                      style={{
+                        minWidth: 1,
+                        height: cur ? 14 : hasAny ? 8 : 4,
+                        outline: cur ? "1.5px solid var(--fg)" : "none",
+                        outlineOffset: 1,
+                      }}
+                      onClick={() => setFrameIdx(i)}
+                    >
+                      {CRITERIA.map((c, ci) => (
+                        <div
+                          key={ci}
+                          className="flex-1"
+                          style={{
+                            background:
+                              threshed[ci] > 0
+                                ? rgba(c.color, probs[ci])
+                                : "var(--scrubber-empty)",
+                          }}
+                        />
+                      ))}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           {/* ── Controls bar ─────────────────────────────────────── */}
           <div
