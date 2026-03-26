@@ -1,117 +1,47 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-
-/* ═══════════════════════════════════════════════════════════════════
-   Types
-   ═══════════════════════════════════════════════════════════════════ */
-type CVSArray = [number, number, number];
-
-type FrameAnnotation = {
-  avg: CVSArray;
-  a1: CVSArray | null;
-  a2: CVSArray | null;
-  a3: CVSArray | null;
-};
-
-type Annotations = Record<string, Record<string, FrameAnnotation>>;
-
-const DEFAULT_ANN: FrameAnnotation = {
-  avg: [0, 0, 0],
-  a1: null,
-  a2: null,
-  a3: null,
-};
-
-type VideoEntry = {
-  id: string;
-  name: string;
-  frames: string[];
-  dirHandle: FileSystemDirectoryHandle;
-};
-
-const IMAGE_EXT = new Set([
-  ".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp",
-]);
+import Link from "next/link";
+import {
+  Annotations,
+  DEFAULT_ANN,
+  FrameAnnotation,
+  VideoEntry,
+  Theme,
+  ModelAnnotations,
+  ModelPrediction,
+} from "../lib/types";
+import { CRITERIA, IMAGE_EXT } from "../lib/constants";
+import { ext, rgba, parseCSV, parseModelPredictionsCSV } from "../lib/helpers";
+import { ThemeIcon } from "@/components/ThemeIcon";
+import { Button } from "@/components/ui/button";
 
 type AppMode = "single" | "compare";
 
-/* ═══════════════════════════════════════════════════════════════════
-   Constants & Helpers
-   ═══════════════════════════════════════════════════════════════════ */
-const CRITERIA = [
-  { label: "C1", color: "#ef4444" },
-  { label: "C2", color: "#22c55e" },
-  { label: "C3", color: "#3b82f6" },
-] as const;
-
-function rgba(hex: string, a: number) {
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  return `rgba(${r},${g},${b},${a})`;
-}
-
-function ext(name: string) {
-  const i = name.lastIndexOf(".");
-  return i >= 0 ? name.slice(i).toLowerCase() : "";
-}
-
-function parseCSVRow(text: string): string[] {
-  const result: string[] = [];
-  let current = "";
-  let inQuotes = false;
-  for (let i = 0; i < text.length; i++) {
-    const char = text[i];
-    if (char === '"') {
-      inQuotes = !inQuotes;
-    } else if (char === "," && !inQuotes) {
-      result.push(current);
-      current = "";
-    } else {
-      current += char;
-    }
-  }
-  result.push(current);
-  return result;
-}
-
-function parseCVS(str: string | undefined): CVSArray | null {
-  if (!str) return null;
-  try {
-    const arr = JSON.parse(str);
-    if (Array.isArray(arr) && arr.length === 3) return arr as CVSArray;
-  } catch {
-    // silently fail
-  }
-  return null;
-}
-
-/* ═══════════════════════════════════════════════════════════════════
-   Component
-   ═══════════════════════════════════════════════════════════════════ */
 export default function Home() {
   /* ── state ─────────────────────────────────────────────────────── */
   const [mode, setMode] = useState<AppMode>("single");
   const [folderName, setFolderName] = useState("");
   const [videos, setVideos] = useState<VideoEntry[]>([]);
-  
+
   const [annotations, setAnnotations] = useState<Annotations>({});
-  const [modelAnnotations, setModelAnnotations] = useState<Annotations>({});
-  
+  const [modelAnnotations, setModelAnnotations] = useState<ModelAnnotations>({});
+  const [threshold, setThreshold] = useState(0.5);
+  const [showAll, setShowAll] = useState(false);
+
   const [vidIdx, setVidIdx] = useState(0);
   const [frameIdx, setFrameIdx] = useState(0);
   const [loaded, setLoaded] = useState(false);
   const [browsing, setBrowsing] = useState(false);
   const [error, setError] = useState("");
-  
+
   const videoListRef = useRef<HTMLDivElement>(null);
   const rootHandle = useRef<FileSystemDirectoryHandle | null>(null);
   const blobCache = useRef<Map<string, string>>(new Map());
   const [frameUrl, setFrameUrl] = useState("");
 
   /* ── theme ──────────────────────────────────────────────────────── */
-  type Theme = "light" | "dark" | "system";
+
   const [theme, setTheme] = useState<Theme>("system");
 
   useEffect(() => {
@@ -141,52 +71,44 @@ export default function Home() {
   }, [theme]);
 
   const cycleTheme = useCallback(() => {
-    setTheme((t) => (t === "dark" ? "light" : t === "light" ? "system" : "dark"));
+    setTheme((t) =>
+      t === "dark" ? "light" : t === "light" ? "system" : "dark",
+    );
   }, []);
 
-  const ThemeIcon = ({ size = 14 }: { size?: number }) => {
-    if (theme === "dark")
-      return (
-        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-        </svg>
-      );
-    if (theme === "light")
-      return (
-        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <circle cx="12" cy="12" r="5" />
-          <line x1="12" y1="1" x2="12" y2="3" /><line x1="12" y1="21" x2="12" y2="23" />
-          <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" /><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
-          <line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" />
-          <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" /><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
-        </svg>
-      );
-    return (
-      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
-        <line x1="8" y1="21" x2="16" y2="21" /><line x1="12" y1="17" x2="12" y2="21" />
-      </svg>
-    );
-  };
-
   /* ── derived ───────────────────────────────────────────────────── */
-  const video = videos[vidIdx];
-  const frame = video?.frames[frameIdx];
-  const total = video?.frames.length ?? 0;
+  // Flat list of all frames across all videos
+  const allFrames = useMemo(() => {
+    const list: { vidId: string; frame: string; vidEntry: VideoEntry }[] = [];
+    for (const v of videos) {
+      for (const f of v.frames) {
+        list.push({ vidId: v.id, frame: f, vidEntry: v });
+      }
+    }
+    return list;
+  }, [videos]);
+
+  const video = showAll ? allFrames[frameIdx]?.vidEntry : videos[vidIdx];
+  const frame = showAll
+    ? allFrames[frameIdx]?.frame
+    : video?.frames[frameIdx];
+  const total = showAll ? allFrames.length : (video?.frames.length ?? 0);
+  const currentVidId = showAll ? allFrames[frameIdx]?.vidId : video?.id;
 
   const ann: FrameAnnotation = useMemo(() => {
-    if (!video || !frame) return DEFAULT_ANN;
-    return annotations[video.id]?.[frame] ?? DEFAULT_ANN;
-  }, [annotations, video, frame]);
+    if (!currentVidId || !frame) return DEFAULT_ANN;
+    return annotations[currentVidId]?.[frame] ?? DEFAULT_ANN;
+  }, [annotations, currentVidId, frame]);
 
-  const modAnn: FrameAnnotation = useMemo(() => {
-    if (!video || !frame) return DEFAULT_ANN;
-    return modelAnnotations[video.id]?.[frame] ?? DEFAULT_ANN;
-  }, [modelAnnotations, video, frame]);
+  const modAnn: ModelPrediction | null = useMemo(() => {
+    if (!currentVidId || !frame) return null;
+    return modelAnnotations[currentVidId]?.[frame] ?? null;
+  }, [modelAnnotations, currentVidId, frame]);
 
   /* ── read image file → blob URL ────────────────────────────────── */
   const getFrameUrl = useCallback(
-    async (v: VideoEntry, frameName: string): Promise<string> => {
+    async (v: VideoEntry | undefined, frameName: string): Promise<string> => {
+      if (!v) return "";
       const key = `${v.id}/${frameName}`;
       const cached = blobCache.current.get(key);
       if (cached) return cached;
@@ -213,7 +135,9 @@ export default function Home() {
     getFrameUrl(video, frame).then((url) => {
       if (!cancelled) setFrameUrl(url);
     });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [video, frame, getFrameUrl]);
 
   /* ── preload neighbour frames ──────────────────────────────────── */
@@ -222,87 +146,22 @@ export default function Home() {
     for (const d of [-1, 1]) {
       const idx = frameIdx + d;
       if (idx >= 0 && idx < video.frames.length) {
-        getFrameUrl(video, video.frames[idx]); 
+        getFrameUrl(video, video.frames[idx]);
       }
     }
   }, [frameIdx, video, getFrameUrl]);
 
-  /* ── parse dataset folder & csv ────────────────────────────────── */
-  const parseCSV = async (
-    file: File, 
-    validImages: Map<string, string>, 
-    isDatasetGT: boolean
-  ) => {
-    const csvText = await file.text();
-    const lines = csvText.trim().split("\n");
-    if (lines.length < 2) throw new Error(`CSV file ${file.name} is empty or missing data rows.`);
-
-    const headers = parseCSVRow(lines[0].trim());
-    const hIdx: Record<string, number> = {};
-    headers.forEach((h, i) => (hIdx[h.trim()] = i));
-
-    const requiredHeaders = isDatasetGT ? ["vid", "frame", "is_ds_keyframe"] : ["vid", "frame"];
-    for (const rh of requiredHeaders) {
-      if (!(rh in hIdx)) throw new Error(`Missing required CSV column: ${rh} in ${file.name}`);
-    }
-
-    const parsedAnnotations: Annotations = {};
-    const vidToFrames: Record<string, { num: number; img: string }[]> = {};
-
-    for (let i = 1; i < lines.length; i++) {
-      const row = parseCSVRow(lines[i].trim());
-      if (row.length < 2) continue;
-
-      // Only filter by is_ds_keyframe if we are loading the ground truth dataset
-      if (isDatasetGT) {
-        const isKeyframeStr = row[hIdx["is_ds_keyframe"]]?.trim().toLowerCase();
-        const isKeyframe = isKeyframeStr === "true" || isKeyframeStr === "1";
-        if (!isKeyframe) continue;
-      }
-
-      const vid = row[hIdx["vid"]];
-      const frameNum = row[hIdx["frame"]];
-      const baseName = `${vid}_${frameNum}`;
-
-      const imgName = validImages.get(baseName);
-      if (!imgName) continue; // skip if image doesn't exist
-
-      if (!vidToFrames[vid]) vidToFrames[vid] = [];
-      vidToFrames[vid].push({ num: parseInt(frameNum, 10), img: imgName });
-
-      if (!parsedAnnotations[vid]) parsedAnnotations[vid] = {};
-      
-      let avg = parseCVS(row[hIdx["avg_cvs"]]);
-      if (!avg) {
-        avg = [
-          parseFloat(row[hIdx["C1"]]) || 0,
-          parseFloat(row[hIdx["C2"]]) || 0,
-          parseFloat(row[hIdx["C3"]]) || 0,
-        ];
-      }
-
-      parsedAnnotations[vid][imgName] = {
-        avg,
-        a1: parseCVS(row[hIdx["cvs_annotator_1"]]),
-        a2: parseCVS(row[hIdx["cvs_annotator_2"]]),
-        a3: parseCVS(row[hIdx["cvs_annotator_3"]]),
-      };
-    }
-
-    return { parsedAnnotations, vidToFrames };
-  };
-
-/* ── open flow (browser File System Access API) ────────────────── */
+  /* ── open flow (browser File System Access API) ────────────────── */
   const startSession = useCallback(async (selectedMode: AppMode) => {
     setBrowsing(true);
     setError("");
     try {
       // 1. Alert & Pick Images Directory Directly
-      alert("Step 1: Select the folder containing your dataset images.");
+      alert("Select the folder containing your dataset images.");
       const allHandle = await window.showDirectoryPicker({ mode: "read" });
-      
+
       // If rootHandle is used elsewhere in your app, we just point it to the selected image folder now
-      rootHandle.current = allHandle; 
+      rootHandle.current = allHandle;
 
       // 2. Cache images directly from the selected folder (no "train" subfolder needed)
       const validImages = new Map<string, string>();
@@ -314,9 +173,14 @@ export default function Home() {
       }
 
       // 3. Prompt for Dataset Annotation CSV
-      alert("Step 2: Select the Ground Truth annotations CSV file.");
+      alert("Select the Ground Truth annotations CSV file.");
       const [gtFileHandle] = await (window as any).showOpenFilePicker({
-        types: [{ description: 'Dataset Annotations CSV', accept: { 'text/csv': ['.csv'] } }],
+        types: [
+          {
+            description: "Dataset Annotations CSV",
+            accept: { "text/csv": [".csv"] },
+          },
+        ],
         multiple: false,
         excludeAcceptAllOption: true,
       });
@@ -326,14 +190,19 @@ export default function Home() {
       // 4. Prompt for Model Annotation CSV if in compare mode
       let modData = null;
       if (selectedMode === "compare") {
-        alert("Step 3: Select the Model Prediction CSV file.");
+        alert("Select the Model Prediction CSV file.");
         const [modFileHandle] = await (window as any).showOpenFilePicker({
-          types: [{ description: 'Model Output CSV', accept: { 'text/csv': ['.csv'] } }],
+          types: [
+            {
+              description: "Model Output CSV",
+              accept: { "text/csv": [".csv"] },
+            },
+          ],
           multiple: false,
           excludeAcceptAllOption: true,
         });
         const modFile = await modFileHandle.getFile();
-        modData = await parseCSV(modFile, validImages, false);
+        modData = await parseModelPredictionsCSV(modFile, validImages);
       }
 
       // Cleanup previous object URLs
@@ -343,11 +212,13 @@ export default function Home() {
       // Consolidate Videos using GT data as the source of truth for frames
       const vids: VideoEntry[] = Object.keys(gtData.vidToFrames).map((vid) => {
         // Remove duplicates if any and sort
-        const uniqueFrames = Array.from(new Set(gtData.vidToFrames[vid].map((f: any) => f.img)));
+        const uniqueFrames = Array.from(
+          new Set(gtData.vidToFrames[vid].map((f: any) => f.img)),
+        );
         const sorted = uniqueFrames.sort((a, b) => {
-            const numA = parseInt(a.split('_')[1], 10);
-            const numB = parseInt(b.split('_')[1], 10);
-            return numA - numB;
+          const numA = parseInt(a.split("_")[1], 10);
+          const numB = parseInt(b.split("_")[1], 10);
+          return numA - numB;
         });
 
         return {
@@ -359,7 +230,9 @@ export default function Home() {
       });
 
       if (vids.length === 0) {
-        throw new Error("No valid keyframes mapped between the images and the dataset CSV.");
+        throw new Error(
+          "No valid keyframes mapped between the images and the dataset CSV.",
+        );
       }
 
       vids.sort((a, b) => parseInt(a.id) - parseInt(b.id));
@@ -368,16 +241,17 @@ export default function Home() {
       setVideos(vids);
       setAnnotations(gtData.parsedAnnotations);
       if (modData) setModelAnnotations(modData.parsedAnnotations);
-      
+
       setMode(selectedMode);
       setVidIdx(0);
       setFrameIdx(0);
       setLoaded(true);
     } catch (e: unknown) {
       if ((e as DOMException)?.name !== "AbortError") {
-        const msg = typeof (window as any).showDirectoryPicker !== "function"
+        const msg =
+          typeof (window as any).showDirectoryPicker !== "function"
             ? "Your browser does not support the File System Access API. Use Chrome or Edge."
-            : (e as Error)?.message ?? "Failed to open folder/files";
+            : ((e as Error)?.message ?? "Failed to open folder/files");
         setError(msg);
         console.error("startSession error:", e);
       } else {
@@ -385,29 +259,33 @@ export default function Home() {
         console.log("User cancelled file/folder selection.");
       }
     }
+
     setBrowsing(false);
   }, []);
 
   /* ── navigation ────────────────────────────────────────────────── */
   const goFrame = useCallback(
     (d: number) => {
-      if (!video) return;
-      setFrameIdx((i) =>
-        Math.max(0, Math.min(i + d, video.frames.length - 1)),
-      );
+      if (showAll) {
+        setFrameIdx((i) => Math.max(0, Math.min(i + d, allFrames.length - 1)));
+      } else {
+        if (!video) return;
+        setFrameIdx((i) => Math.max(0, Math.min(i + d, video.frames.length - 1)));
+      }
     },
-    [video],
+    [video, showAll, allFrames.length],
   );
 
   const goVideo = useCallback(
     (d: number) => {
+      if (showAll) return; // no video switching in all-frames mode
       setVidIdx((i) => {
         const n = Math.max(0, Math.min(i + d, videos.length - 1));
         if (n !== i) setFrameIdx(0);
         return n;
       });
     },
-    [videos.length],
+    [videos.length, showAll],
   );
 
   /* ── keyboard ──────────────────────────────────────────────────── */
@@ -467,57 +345,95 @@ export default function Home() {
      ═════════════════════════════════════════════════════════════════ */
   if (!loaded) {
     return (
-      <div className="h-screen flex flex-col items-center justify-center gap-10" style={{ background: "var(--bg)", color: "var(--fg)" }}>
+      <div
+        className="h-screen flex flex-col items-center justify-center gap-10"
+        style={{ background: "var(--bg)", color: "var(--fg)" }}
+      >
         <button
           onClick={cycleTheme}
           className="absolute top-4 right-4 w-8 h-8 flex items-center justify-center rounded-lg transition-colors"
           style={{ background: "var(--surface)", color: "var(--fg-muted)" }}
           title={`Theme: ${theme}`}
         >
-          <ThemeIcon size={14} />
+          <ThemeIcon size={14} theme={theme} />
         </button>
 
         <div className="flex flex-col items-center gap-1.5">
           <h1 className="text-5xl font-bold tracking-tighter">
             <span className="opacity-40 mr-1">◆</span> CVS Dataset Visualizer
           </h1>
-          <p className="text-[11px] uppercase tracking-[0.3em]" style={{ color: "var(--fg-muted)" }}>
+          <p
+            className="text-[11px] uppercase tracking-[0.3em]"
+            style={{ color: "var(--fg-muted)" }}
+          >
             Review Annotations & Compare Models
           </p>
         </div>
 
         <div className="flex flex-col items-center gap-4">
           <div className="flex gap-4">
-            <button
+            <Button
               onClick={() => startSession("single")}
               disabled={browsing}
               className="h-14 px-8 font-semibold rounded-lg text-sm disabled:opacity-50 disabled:cursor-wait transition-colors flex items-center gap-3 bg-neutral-100 text-black hover:bg-neutral-200 active:bg-neutral-300 dark:bg-neutral-800 dark:text-white dark:hover:bg-neutral-700"
             >
-              <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+              <svg
+                width="18"
+                height="18"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth="2"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"
+                />
               </svg>
-              View Dataset (Single)
-            </button>
-            <button
+              View Dataset
+            </Button>
+            <Button
               onClick={() => startSession("compare")}
               disabled={browsing}
-              className="h-14 px-8 font-semibold rounded-lg text-sm disabled:opacity-50 disabled:cursor-wait transition-colors flex items-center gap-3 bg-blue-600 text-white hover:bg-blue-700 active:bg-blue-800"
+              className="h-14 px-8 font-semibold rounded-lg text-sm disabled:opacity-50 disabled:cursor-wait transition-colors flex items-center gap-3  bg-neutral-100 text-black hover:bg-neutral-200 active:bg-neutral-300 dark:bg-neutral-800 dark:text-white dark:hover:bg-neutral-700"
             >
-              <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M8 7v8a2 2 0 002 2h6M8 7V5a2 2 0 012-2h4.586a1 1 0 01.707.293l4.414 4.414a1 1 0 01.293.707V15a2 2 0 01-2 2h-2M8 7H6a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2v-2" />
+              <svg
+                width="18"
+                height="18"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth="2"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M8 7v8a2 2 0 002 2h6M8 7V5a2 2 0 012-2h4.586a1 1 0 01.707.293l4.414 4.414a1 1 0 01.293.707V15a2 2 0 01-2 2h-2M8 7H6a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2v-2"
+                />
               </svg>
               Compare Model Output
-            </button>
+            </Button>
+            <Link href="/eda">
+              <Button
+                disabled={browsing}
+                className="h-14 px-8 font-semibold rounded-lg text-sm disabled:opacity-50 disabled:cursor-wait transition-colors flex items-center gap-3 bg-blue-600 text-white hover:bg-blue-700 active:bg-blue-800"
+              >
+                EDA
+              </Button>
+            </Link>
           </div>
-          
+
           {error && (
-            <p className="text-xs text-red-400 max-w-md text-center bg-red-400/10 p-2 rounded">{error}</p>
+            <p className="text-xs text-red-400 max-w-md text-center bg-red-400/10 p-2 rounded">
+              {error}
+            </p>
           )}
-          
-          <div className="text-[11px] mt-1 text-center" style={{ color: "var(--fg-faint)" }}>
+
+          {/* <div className="text-[11px] mt-1 text-center" style={{ color: "var(--fg-faint)" }}>
             <p>1. Select root dataset folder (containing 'train')</p>
             <p>2. Select the relevant CSV files when prompted</p>
-          </div>
+          </div> */}
         </div>
       </div>
     );
@@ -526,58 +442,110 @@ export default function Home() {
   /* ═════════════════════════════════════════════════════════════════
      Main Viewer
      ═════════════════════════════════════════════════════════════════ */
-const infoRows = mode === "compare" 
-    ? [
-        { label: "GT AVG", data: ann.avg, isAvg: true },
-        { label: "GT A1", data: ann.a1, isAvg: false },
-        { label: "GT A2", data: ann.a2, isAvg: false },
-        { label: "GT A3", data: ann.a3, isAvg: false },
-        // { label: "MD AVG", data: modAnn.avg, isAvg: true },
-        { label: "Model", data: modAnn.a1, isAvg: false },
-        // { label: "MD A2", data: modAnn.a2, isAvg: false },
-        // { label: "MD A3", data: modAnn.a3, isAvg: false },
-      ]
-    : [
-        { label: "AVG", data: ann.avg, isAvg: true },
-        { label: "A1", data: ann.a1, isAvg: false },
-        { label: "A2", data: ann.a2, isAvg: false },
-        { label: "A3", data: ann.a3, isAvg: false },
-      ];
+  // Build GT annotator rows dynamically (only show annotators that have data)
+  const gtAnnotatorRows: { label: string; data: [number, number, number] | null; isAvg: boolean }[] = [
+    { label: mode === "compare" ? "GT AVG" : "AVG", data: ann.avg, isAvg: true },
+  ];
+  if (ann.a1) gtAnnotatorRows.push({ label: mode === "compare" ? "GT A1" : "A1", data: ann.a1, isAvg: false });
+  if (ann.a2) gtAnnotatorRows.push({ label: mode === "compare" ? "GT A2" : "A2", data: ann.a2, isAvg: false });
+  if (ann.a3) gtAnnotatorRows.push({ label: mode === "compare" ? "GT A3" : "A3", data: ann.a3, isAvg: false });
+
+  // Model prediction thresholded values
+  const modelThresholded: [number, number, number] | null = modAnn
+    ? [modAnn.c1 >= threshold ? 1 : 0, modAnn.c2 >= threshold ? 1 : 0, modAnn.c3 >= threshold ? 1 : 0]
+    : null;
 
   return (
-    <div className="h-screen flex flex-col select-none overflow-hidden" style={{ background: "var(--bg)", color: "var(--fg)" }}>
+    <div
+      className="h-screen flex flex-col select-none overflow-hidden"
+      style={{ background: "var(--bg)", color: "var(--fg)" }}
+    >
       {/* ── Header ─────────────────────────────────────────────── */}
-      <header className="h-11 shrink-0 flex items-center gap-4 px-4" style={{ borderBottom: "1px solid var(--border)" }}>
+      <header
+        className="h-11 shrink-0 flex items-center gap-4 px-4"
+        style={{ borderBottom: "1px solid var(--border)" }}
+      >
         <span className="text-xs font-bold tracking-tight shrink-0 opacity-70 flex items-center gap-2">
-          ◆ CVS Viewer <span className="text-[9px] px-1.5 py-0.5 rounded bg-neutral-500/20">{mode.toUpperCase()} MODE</span>
+          ◆ CVS Viewer{" "}
+          <span className="text-[9px] px-1.5 py-0.5 rounded bg-neutral-500/20">
+            {mode.toUpperCase()} MODE
+          </span>
         </span>
 
         <div className="h-5 w-px" style={{ background: "var(--border)" }} />
 
-        <span className="text-[11px] font-mono truncate max-w-sm" style={{ color: "var(--fg-muted)" }} title={folderName}>
+        <span
+          className="text-[11px] font-mono truncate max-w-sm"
+          style={{ color: "var(--fg-muted)" }}
+          title={folderName}
+        >
           {folderName}
         </span>
 
         <button
-          onClick={() => { setLoaded(false); setError(""); }}
+          onClick={() => {
+            setLoaded(false);
+            setError("");
+          }}
           disabled={browsing}
           className="h-7 px-3 text-[11px] rounded disabled:opacity-40 transition-colors flex items-center gap-1.5"
           style={{ background: "var(--btn-bg)", color: "var(--fg-muted)" }}
         >
-          <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+          <svg
+            width="12"
+            height="12"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            strokeWidth="2"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M10 19l-7-7m0 0l7-7m-7 7h18"
+            />
           </svg>
           Back to Setup
         </button>
 
         <div className="ml-auto flex items-center gap-3">
+          {mode === "compare" && (
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] uppercase tracking-widest" style={{ color: "var(--fg-muted)" }}>
+                Threshold
+              </span>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.01"
+                value={threshold}
+                onChange={(e) => setThreshold(parseFloat(e.target.value))}
+                className="w-28 h-1 accent-blue-500 cursor-pointer"
+                style={{ accentColor: "#3b82f6" }}
+              />
+              <input
+                type="number"
+                min="0"
+                max="1"
+                step="0.001"
+                value={threshold}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value);
+                  if (!isNaN(v) && v >= 0 && v <= 1) setThreshold(v);
+                }}
+                className="w-16 h-6 text-[11px] text-center font-mono rounded border bg-transparent"
+                style={{ borderColor: "var(--border)", color: "var(--fg)" }}
+              />
+            </div>
+          )}
           <button
             onClick={cycleTheme}
             className="w-7 h-7 flex items-center justify-center rounded transition-colors"
             style={{ background: "var(--btn-bg)", color: "var(--fg-muted)" }}
             title={`Theme: ${theme}`}
           >
-            <ThemeIcon size={13} />
+            <ThemeIcon size={13} theme={theme} />
           </button>
         </div>
       </header>
@@ -585,85 +553,172 @@ const infoRows = mode === "compare"
       {/* ── Body ───────────────────────────────────────────────── */}
       <div className="flex-1 flex min-h-0">
         {/* ── Sidebar ──────────────────────────────────────────── */}
-        <aside className="w-56 shrink-0 flex flex-col" style={{ borderRight: "1px solid var(--border)" }}>
-          <div className="h-8 flex items-center justify-between px-4 shrink-0" style={{ borderBottom: "1px solid var(--border-subtle)" }}>
-            <span className="text-[10px] uppercase tracking-widest" style={{ color: "var(--fg-muted)" }}>
-              Videos
-            </span>
-            <span className="text-[10px] tabular-nums" style={{ color: "var(--fg-faint)" }}>
-              {videos.length}
-            </span>
+        <aside
+          className="w-56 shrink-0 flex flex-col"
+          style={{ borderRight: "1px solid var(--border)" }}
+        >
+          {/* Segmented toggle: Videos / All */}
+          <div
+            className="flex items-center px-3 py-1.5 gap-1 shrink-0"
+            style={{ borderBottom: "1px solid var(--border-subtle)" }}
+          >
+            {(["videos", "all"] as const).map((tab) => {
+              const active = tab === "videos" ? !showAll : showAll;
+              return (
+                <button
+                  key={tab}
+                  onClick={() => {
+                    const next = tab === "all";
+                    if (next !== showAll) {
+                      setShowAll(next);
+                      setFrameIdx(0);
+                      setVidIdx(0);
+                    }
+                  }}
+                  className="flex-1 text-[10px] uppercase tracking-widest py-1 rounded transition-colors font-medium"
+                  style={{
+                    background: active ? "var(--surface)" : "transparent",
+                    color: active ? "var(--fg)" : "var(--fg-faint)",
+                    border: active ? "1px solid var(--border)" : "1px solid transparent",
+                  }}
+                >
+                  {tab === "videos" ? `Videos (${videos.length})` : `All (${allFrames.length})`}
+                </button>
+              );
+            })}
           </div>
 
-          <div className="flex items-center gap-3 px-4 py-1.5 shrink-0" style={{ borderBottom: "1px solid var(--border-subtle)" }}>
+          <div
+            className="flex items-center gap-3 px-4 py-1.5 shrink-0"
+            style={{ borderBottom: "1px solid var(--border-subtle)" }}
+          >
             {CRITERIA.map((c, ci) => (
               <div key={ci} className="flex items-center gap-1">
-                <div className="w-1.5 h-1.5 rounded-full" style={{ background: c.color }} />
-                <span className="text-[9px]" style={{ color: "var(--fg-muted)" }}>{c.label}</span>
+                <div
+                  className="w-1.5 h-1.5 rounded-full"
+                  style={{ background: c.color }}
+                />
+                <span
+                  className="text-[9px]"
+                  style={{ color: "var(--fg-muted)" }}
+                >
+                  {c.label}
+                </span>
               </div>
             ))}
           </div>
 
           <div className="flex-1 overflow-y-auto" ref={videoListRef}>
-            {videos.map((v, i) => {
-              const active = i === vidIdx;
-              const st = stats[i];
-              return (
-                <button
-                  key={v.id}
-                  data-active={active}
-                  onClick={() => {
-                    setVidIdx(i);
-                    setFrameIdx(0);
-                  }}
-                  className="w-full text-left px-4 py-2 transition-colors border-l-2"
-                  style={{
-                    borderColor: active ? "var(--fg)" : "transparent",
-                    background: active ? "var(--surface)" : undefined,
-                  }}
-                >
-                  <div className="flex items-center gap-2">
+            {showAll ? (
+              /* ── All frames flat list ─────────────────────── */
+              allFrames.map((entry, i) => {
+                const active = i === frameIdx;
+                const fa = annotations[entry.vidId]?.[entry.frame] ?? DEFAULT_ANN;
+                const hasAny = fa.avg[0] > 0 || fa.avg[1] > 0 || fa.avg[2] > 0;
+                return (
+                  <button
+                    key={`${entry.vidId}_${entry.frame}`}
+                    data-active={active}
+                    onClick={() => setFrameIdx(i)}
+                    className="w-full text-left px-3 py-1 transition-colors border-l-2 flex items-center gap-2"
+                    style={{
+                      borderColor: active ? "var(--fg)" : "transparent",
+                      background: active ? "var(--surface)" : undefined,
+                    }}
+                  >
+                    {/* Mini C1/C2/C3 dots */}
+                    <div className="flex gap-[3px] shrink-0">
+                      {CRITERIA.map((c, ci) => (
+                        <div
+                          key={ci}
+                          className="w-[6px] h-[6px] rounded-full"
+                          style={{
+                            background: fa.avg[ci] > 0 ? c.color : "var(--border-subtle)",
+                            opacity: fa.avg[ci] > 0 ? 1 : 0.4,
+                          }}
+                        />
+                      ))}
+                    </div>
                     <span
-                      className="text-[11px] truncate flex-1 font-mono"
+                      className="text-[10px] truncate flex-1 font-mono"
                       style={{
                         color: active ? "var(--fg)" : "var(--fg-muted)",
                         fontWeight: active ? 500 : 400,
                       }}
                     >
-                      {v.name}
+                      {entry.frame}
                     </span>
-                  </div>
-
-                  {/* Based on Average Annotations (GT) */}
-                  <div className="flex items-center gap-1 mt-1.5">
-                    {CRITERIA.map((c, ci) => (
-                      <div
-                        key={ci}
-                        className="h-[3px] flex-1 rounded-full overflow-hidden"
-                        style={{ background: "var(--border-subtle)" }}
+                  </button>
+                );
+              })
+            ) : (
+              /* ── Grouped by video ────────────────────────── */
+              videos.map((v, i) => {
+                const active = i === vidIdx;
+                const st = stats[i];
+                return (
+                  <button
+                    key={v.id}
+                    data-active={active}
+                    onClick={() => {
+                      setVidIdx(i);
+                      setFrameIdx(0);
+                    }}
+                    className="w-full text-left px-4 py-2 transition-colors border-l-2"
+                    style={{
+                      borderColor: active ? "var(--fg)" : "transparent",
+                      background: active ? "var(--surface)" : undefined,
+                    }}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span
+                        className="text-[11px] truncate flex-1 font-mono"
+                        style={{
+                          color: active ? "var(--fg)" : "var(--fg-muted)",
+                          fontWeight: active ? 500 : 400,
+                        }}
                       >
+                        {v.name}
+                      </span>
+                    </div>
+
+                    {/* Based on Average Annotations (GT) */}
+                    <div className="flex items-center gap-1 mt-1.5">
+                      {CRITERIA.map((c, ci) => (
                         <div
-                          className="h-full rounded-full transition-all duration-300"
-                          style={{
-                            width: `${v.frames.length > 0 ? (st.counts[ci] / v.frames.length) * 100 : 0}%`,
-                            background: c.color,
-                          }}
-                        />
-                      </div>
-                    ))}
-                    <span className="text-[9px] ml-1 tabular-nums w-6 text-right shrink-0" style={{ color: "var(--fg-faint)" }}>
-                      {v.frames.length}
-                    </span>
-                  </div>
-                </button>
-              );
-            })}
+                          key={ci}
+                          className="h-[3px] flex-1 rounded-full overflow-hidden"
+                          style={{ background: "var(--border-subtle)" }}
+                        >
+                          <div
+                            className="h-full rounded-full transition-all duration-300"
+                            style={{
+                              width: `${v.frames.length > 0 ? (st.counts[ci] / v.frames.length) * 100 : 0}%`,
+                              background: c.color,
+                            }}
+                          />
+                        </div>
+                      ))}
+                      <span
+                        className="text-[9px] ml-1 tabular-nums w-6 text-right shrink-0"
+                        style={{ color: "var(--fg-faint)" }}
+                      >
+                        {v.frames.length}
+                      </span>
+                    </div>
+                  </button>
+                );
+              })
+            )}
           </div>
         </aside>
 
         {/* ── Main content ─────────────────────────────────────── */}
         <main className="flex-1 flex flex-col min-w-0">
-          <div className="flex-1 flex items-center justify-center min-h-0 relative" style={{ background: "var(--bg-deep)" }}>
+          <div
+            className="flex-1 flex items-center justify-center min-h-0 relative"
+            style={{ background: "var(--bg-deep)" }}
+          >
             {frameUrl ? (
               /* eslint-disable-next-line @next/next/no-img-element */
               <img
@@ -677,86 +732,172 @@ const infoRows = mode === "compare"
               <span className="text-neutral-700 text-sm">No frame</span>
             )}
 
-            {/* Comprehensive Annotators Data Stack */}
-            <div 
-              className="absolute top-3 right-3 flex flex-col gap-1.5 p-3 rounded-lg shadow-sm backdrop-blur-md" 
-              style={{ background: rgba("var(--surface)", 0.8), border: "1px solid var(--border)" }}
+            {/* Annotation Overlay */}
+            <div
+              className="absolute top-3 right-3 flex flex-col gap-1 p-3 rounded-xl shadow-lg backdrop-blur-xl"
+              style={{
+                background: "rgba(0,0,0,0.75)",
+                border: "1px solid rgba(255,255,255,0.1)",
+                minWidth: 200,
+              }}
             >
-              {infoRows.map((row) => {
+              {/* GT Annotator Rows */}
+              {gtAnnotatorRows.map((row) => {
                 const rowData = row.data || [0, 0, 0];
                 const hasData = row.data !== null;
 
-                const isModelStart = row.label === "Model";
-
                 return (
-                  <div key={row.label} className={`flex items-center gap-3 ${isModelStart ? "mt-2 pt-2 border-t border-neutral-500/20" : ""}`}>
-                    <span className="text-[10px] font-bold w-12 tracking-wide" style={{ color: "var(--fg)" }}>
+                  <div key={row.label} className="flex items-center gap-3 py-0.5">
+                    <span className="text-[10px] font-bold w-14 tracking-wide text-neutral-300">
                       {row.label}
                     </span>
                     <div className="flex gap-2">
-                       {CRITERIA.map((c, ci) => {
-                      const val = rowData[ci];
-                      const isActive = val > 0;
+                      {CRITERIA.map((c, ci) => {
+                        const val = rowData[ci];
+                        const isActive = val > 0;
 
-                      if (row.isAvg) {
+                        if (row.isAvg) {
+                          return (
+                            <div
+                              key={ci}
+                              className="w-9 py-0.5 text-center text-[10px] font-mono rounded transition-colors"
+                              style={{
+                                color: isActive ? c.color : "rgba(255,255,255,0.3)",
+                                background: isActive ? rgba(c.color, 0.15) : "transparent",
+                                border: `1px solid ${isActive ? rgba(c.color, 0.6) : "rgba(255,255,255,0.1)"}`,
+                              }}
+                              title={`${c.label} Score: ${val.toFixed(2)}`}
+                            >
+                              {Number(val).toFixed(2)}
+                            </div>
+                          );
+                        }
+
                         return (
-                          <div
-                            key={ci}
-                            className="w-8 py-0.5 text-center text-[9px] font-mono rounded transition-colors"
-                            style={{
-                              color: isActive ? c.color : "var(--fg-faint)",
-                              background: isActive ? rgba(c.color, 0.1) : "transparent",
-                              border: `1px solid ${isActive ? rgba(c.color, 0.5) : "var(--border)"}`,
-                            }}
-                            title={`${c.label} Score: ${val.toFixed(2)}`}
-                          >
-                            {Number(val).toFixed(2)}
+                          <div key={ci} className="w-9 flex justify-center items-center">
+                            <div
+                              className="w-5 h-5 flex items-center justify-center text-[8px] font-bold rounded-full transition-all duration-150"
+                              style={{
+                                border: `1.5px solid ${hasData ? c.color : "rgba(255,255,255,0.15)"}`,
+                                background: isActive && hasData ? c.color : "transparent",
+                                color: isActive && hasData ? "#fff" : hasData ? c.color : "rgba(255,255,255,0.3)",
+                                opacity: hasData ? (isActive ? 1 : 0.6) : 0.4,
+                                boxShadow: isActive && hasData ? `0 0 10px ${rgba(c.color, 0.5)}` : "none",
+                              }}
+                              title={hasData ? `${c.label}: ${val}` : "Not annotated"}
+                            >
+                              {c.label}
+                            </div>
                           </div>
                         );
-                      }
-
-                      return (
-                        <div key={ci} className="w-8 flex justify-center items-center">
-                          <div
-                            className="w-5 h-5 flex items-center justify-center text-[8px] font-bold rounded-full transition-all duration-150"
-                            style={{
-                              border: `1px solid ${hasData ? c.color : "var(--border)"}`,
-                              background: isActive && hasData ? c.color : "transparent",
-                              color: isActive && hasData ? "#ffffff" : (hasData ? c.color : "var(--fg-muted)"),
-                              opacity: hasData ? (isActive ? 1 : 0.6) : 0.4,
-                              boxShadow: isActive && hasData ? `0 0 8px ${rgba(c.color, 0.4)}` : "none",
-                            }}
-                            title={hasData ? `${c.label}: ${val}` : "Not annotated"}
-                          >
-                            {c.label}
-                          </div>
-                        </div>
-                      );
-                    })}
+                      })}
                     </div>
                   </div>
                 );
               })}
+
+              {/* Model Prediction Row */}
+              {mode === "compare" && (
+                <>
+                  <div className="border-t border-white/10 my-1" />
+                  {/* Probabilities */}
+                  <div className="flex items-center gap-3 py-0.5">
+                    <span className="text-[10px] font-bold w-14 tracking-wide text-blue-300">
+                      Prob
+                    </span>
+                    <div className="flex gap-2">
+                      {CRITERIA.map((c, ci) => {
+                        const prob = modAnn ? [modAnn.c1, modAnn.c2, modAnn.c3][ci] : 0;
+                        return (
+                          <div
+                            key={ci}
+                            className="w-9 py-0.5 text-center text-[10px] font-mono rounded transition-colors"
+                            style={{
+                              color: prob > 0 ? c.color : "rgba(255,255,255,0.3)",
+                              background: prob > 0 ? rgba(c.color, 0.15) : "transparent",
+                              border: `1px solid ${prob > 0 ? rgba(c.color, 0.6) : "rgba(255,255,255,0.1)"}`,
+                            }}
+                            title={`${c.label} Probability: ${prob.toFixed(4)}`}
+                          >
+                            {prob.toFixed(2)}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  {/* Thresholded */}
+                  <div className="flex items-center gap-3 py-0.5">
+                    <span className="text-[10px] font-bold w-14 tracking-wide text-blue-300">
+                      Model
+                    </span>
+                    <div className="flex gap-2">
+                      {CRITERIA.map((c, ci) => {
+                        const isActive = modelThresholded ? modelThresholded[ci] > 0 : false;
+                        return (
+                          <div key={ci} className="w-9 flex justify-center items-center">
+                            <div
+                              className="w-5 h-5 flex items-center justify-center text-[8px] font-bold rounded-full transition-all duration-150"
+                              style={{
+                                border: `1.5px solid ${modAnn ? c.color : "rgba(255,255,255,0.15)"}`,
+                                background: isActive ? c.color : "transparent",
+                                color: isActive ? "#fff" : modAnn ? c.color : "rgba(255,255,255,0.3)",
+                                opacity: modAnn ? (isActive ? 1 : 0.6) : 0.4,
+                                boxShadow: isActive ? `0 0 10px ${rgba(c.color, 0.5)}` : "none",
+                              }}
+                              title={modAnn ? `${c.label}: ${isActive ? "Yes" : "No"} (t=${threshold})` : "No prediction"}
+                            >
+                              {c.label}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
 
             <div className="absolute top-3 left-3 flex gap-2">
-              <span className="px-2 py-1 rounded text-[10px] uppercase tracking-widest font-mono" style={{ background: "var(--surface)", border: "1px solid var(--border)", color: "var(--fg-muted)" }}>
+              <span
+                className="px-2 py-1 rounded text-[10px] uppercase tracking-widest font-mono"
+                style={{
+                  background: "var(--surface)",
+                  border: "1px solid var(--border)",
+                  color: "var(--fg-muted)",
+                }}
+              >
                 {video?.name}
               </span>
             </div>
           </div>
 
-          {/* ── Scrubber (Based on GT) ─────────────────────────────── */}
-          <div className="h-5 shrink-0 flex items-center justify-center px-3" style={{ background: "var(--scrubber-bg)" }}>
+          {/* ── Scrubber: GT Annotations ─────────────────────────── */}
+          <div
+            className="shrink-0 flex items-center px-3"
+            style={{
+              background: "var(--scrubber-bg)",
+              height: mode === "compare" ? 16 : 20,
+            }}
+          >
+            {mode === "compare" && (
+              <span className="text-[8px] uppercase tracking-widest shrink-0 w-8 text-center" style={{ color: "var(--fg-faint)" }}>GT</span>
+            )}
             <div
               className="flex items-end gap-px w-full py-0.5"
               style={{
-                maxWidth: total <= 100 ? `${total * 10}px` : total <= 300 ? `${total * 5}px` : "100%",
+                maxWidth:
+                  total <= 100
+                    ? `${total * 10}px`
+                    : total <= 300
+                      ? `${total * 5}px`
+                      : "100%",
                 margin: "0 auto",
               }}
             >
-              {video?.frames.map((f, i) => {
-                const fa = annotations[video.id]?.[f] ?? DEFAULT_ANN;
+              {(showAll ? allFrames : (video?.frames ?? []).map(f => ({ vidId: video!.id, frame: f }))).map((entry, i) => {
+                const f = typeof entry === "string" ? entry : entry.frame;
+                const vid = typeof entry === "string" ? video!.id : entry.vidId;
+                const fa = annotations[vid]?.[f] ?? DEFAULT_ANN;
                 const cur = i === frameIdx;
                 const hasAny = fa.avg[0] > 0 || fa.avg[1] > 0 || fa.avg[2] > 0;
                 return (
@@ -776,7 +917,10 @@ const infoRows = mode === "compare"
                         key={ci}
                         className="flex-1"
                         style={{
-                          background: fa.avg[ci] > 0 ? rgba(c.color, fa.avg[ci]) : "var(--scrubber-empty)",
+                          background:
+                            fa.avg[ci] > 0
+                              ? rgba(c.color, fa.avg[ci])
+                              : "var(--scrubber-empty)",
                         }}
                       />
                     ))}
@@ -786,8 +930,80 @@ const infoRows = mode === "compare"
             </div>
           </div>
 
+          {/* ── Scrubber: Model Predictions (compare mode only) ──── */}
+          {mode === "compare" && (
+            <div
+              className="shrink-0 flex items-center px-3"
+              style={{
+                background: "var(--scrubber-bg)",
+                height: 16,
+                borderTop: "1px solid var(--border-subtle)",
+              }}
+            >
+              <span className="text-[8px] uppercase tracking-widest shrink-0 w-8 text-center" style={{ color: "var(--fg-faint)" }}>MD</span>
+              <div
+                className="flex items-end gap-px w-full py-0.5"
+                style={{
+                  maxWidth:
+                    total <= 100
+                      ? `${total * 10}px`
+                      : total <= 300
+                        ? `${total * 5}px`
+                        : "100%",
+                  margin: "0 auto",
+                }}
+              >
+                {(showAll ? allFrames : (video?.frames ?? []).map(f => ({ vidId: video!.id, frame: f }))).map((entry, i) => {
+                  const f = typeof entry === "string" ? entry : entry.frame;
+                  const vid = typeof entry === "string" ? video!.id : entry.vidId;
+                  const mp = modelAnnotations[vid]?.[f];
+                  const cur = i === frameIdx;
+                  const probs = mp ? [mp.c1, mp.c2, mp.c3] : [0, 0, 0];
+                  const threshed: [number, number, number] = [
+                    probs[0] >= threshold ? 1 : 0,
+                    probs[1] >= threshold ? 1 : 0,
+                    probs[2] >= threshold ? 1 : 0,
+                  ];
+                  const hasAny = threshed[0] > 0 || threshed[1] > 0 || threshed[2] > 0;
+                  return (
+                    <div
+                      key={i}
+                      className="flex-1 cursor-pointer flex flex-col rounded-[1px] overflow-hidden transition-all duration-100"
+                      style={{
+                        minWidth: 1,
+                        height: cur ? 14 : hasAny ? 8 : 4,
+                        outline: cur ? "1.5px solid var(--fg)" : "none",
+                        outlineOffset: 1,
+                      }}
+                      onClick={() => setFrameIdx(i)}
+                    >
+                      {CRITERIA.map((c, ci) => (
+                        <div
+                          key={ci}
+                          className="flex-1"
+                          style={{
+                            background:
+                              threshed[ci] > 0
+                                ? rgba(c.color, probs[ci])
+                                : "var(--scrubber-empty)",
+                          }}
+                        />
+                      ))}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {/* ── Controls bar ─────────────────────────────────────── */}
-          <div className="shrink-0 flex items-center justify-between px-6 h-14" style={{ background: "var(--controls-bg)", borderTop: "1px solid var(--border)" }}>
+          <div
+            className="shrink-0 flex items-center justify-between px-6 h-14"
+            style={{
+              background: "var(--controls-bg)",
+              borderTop: "1px solid var(--border)",
+            }}
+          >
             <div className="flex items-center gap-3">
               <button
                 onClick={() => goFrame(-1)}
@@ -798,10 +1014,16 @@ const infoRows = mode === "compare"
                 ◀
               </button>
               <div className="text-center min-w-[180px]">
-                <div className="text-[11px] truncate font-mono" style={{ color: "var(--fg)" }}>
+                <div
+                  className="text-[11px] truncate font-mono"
+                  style={{ color: "var(--fg)" }}
+                >
                   {frame}
                 </div>
-                <div className="text-[10px] tabular-nums" style={{ color: "var(--fg-faint)" }}>
+                <div
+                  className="text-[10px] tabular-nums"
+                  style={{ color: "var(--fg-faint)" }}
+                >
                   {frameIdx + 1} / {total}
                 </div>
               </div>
@@ -815,7 +1037,10 @@ const infoRows = mode === "compare"
               </button>
             </div>
 
-            <div className="flex items-center gap-5 text-[9px] uppercase tracking-widest" style={{ color: "var(--fg-faint)" }}>
+            <div
+              className="flex items-center gap-5 text-[9px] uppercase tracking-widest"
+              style={{ color: "var(--fg-faint)" }}
+            >
               <span>← → Navigate Frames</span>
               <span>↑ ↓ Switch Videos</span>
             </div>
