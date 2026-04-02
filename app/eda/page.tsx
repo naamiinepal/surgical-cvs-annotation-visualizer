@@ -5,18 +5,20 @@ import {
   DEFAULT_ANN,
   FrameAnnotation,
   VideoEntry,
-  Theme,
 } from "../../lib/types";
-import { CRITERIA, IMAGE_EXT } from "../../lib/constants";
-import { ext, parseCSV, rgba } from "../../lib/helpers";
+import { IMAGE_EXT } from "../../lib/constants";
+import { ext, parseCSV } from "../../lib/helpers";
 import dynamic from "next/dynamic";
+import { useTheme } from "../../lib/hooks/useTheme";
+import { useKeyboardNav } from "../../lib/hooks/useKeyboardNav";
+import { Header } from "@/components/Header";
+import { EdaSidebar } from "@/components/EdaSidebar";
+import { EdaLandingScreen } from "@/components/EdaLandingScreen";
 
 const VideoDistributions = dynamic(
   () => import("@/components/VideoDistributions"),
   { ssr: false },
 );
-import { ThemeIcon } from "@/components/ThemeIcon";
-import { Button } from "@/components/ui/button";
 
 export default function EdaPage() {
   const [groupMode, setGroupMode] = useState<"video" | "all">("video");
@@ -27,43 +29,12 @@ export default function EdaPage() {
   const [frameIdx, setFrameIdx] = useState(0);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState("");
-  const [theme, setTheme] = useState<Theme>("system");
+
   const rootHandle = useRef<FileSystemDirectoryHandle | null>(null);
   const blobCache = useRef<Map<string, string>>(new Map());
   const videoListRef = useRef<HTMLDivElement>(null);
-  const [frameUrl, setFrameUrl] = useState("");
 
-  useEffect(() => {
-    const saved = localStorage.getItem("theme") as Theme | null;
-    if (saved === "light" || saved === "dark" || saved === "system") {
-      setTheme(saved);
-    }
-  }, []);
-
-  useEffect(() => {
-    const root = document.documentElement;
-    if (theme === "dark") {
-      root.classList.add("dark");
-    } else if (theme === "light") {
-      root.classList.remove("dark");
-    } else {
-      const mq = matchMedia("(prefers-color-scheme: dark)");
-      const apply = () => {
-        if (mq.matches) root.classList.add("dark");
-        else root.classList.remove("dark");
-      };
-      apply();
-      mq.addEventListener("change", apply);
-      return () => mq.removeEventListener("change", apply);
-    }
-    localStorage.setItem("theme", theme);
-  }, [theme]);
-
-  const cycleTheme = useCallback(() => {
-    setTheme((t) =>
-      t === "dark" ? "light" : t === "light" ? "system" : "dark",
-    );
-  }, []);
+  const { theme, cycleTheme } = useTheme();
 
   // Load images only
   const loadImages = async () => {
@@ -78,17 +49,27 @@ export default function EdaPage() {
           validImages.set(base, entry.name);
         }
       }
-      // Group by video id (prefix before first '_')
+      // Group by video id (prefix before last '_')
       const vidsMap: Record<string, string[]> = {};
       for (const [base, name] of validImages.entries()) {
-        const vidId = base.split("_")[0];
+        const lastUnderscore = base.lastIndexOf("_");
+        const vidId =
+          lastUnderscore === -1 ? base : base.substring(0, lastUnderscore);
         if (!vidsMap[vidId]) vidsMap[vidId] = [];
         vidsMap[vidId].push(name);
       }
       const vids: VideoEntry[] = Object.keys(vidsMap).map((vid) => {
         const sorted = vidsMap[vid].sort((a, b) => {
-          const numA = parseInt(a.split("_")[1], 10);
-          const numB = parseInt(b.split("_")[1], 10);
+          const baseA = a.substring(0, a.lastIndexOf("."));
+          const baseB = b.substring(0, b.lastIndexOf("."));
+          const numA = parseInt(
+            baseA.substring(baseA.lastIndexOf("_") + 1),
+            10,
+          );
+          const numB = parseInt(
+            baseB.substring(baseB.lastIndexOf("_") + 1),
+            10,
+          );
           return numA - numB;
         });
         return {
@@ -109,13 +90,7 @@ export default function EdaPage() {
       blobCache.current.clear();
     } catch (e: unknown) {
       if ((e as DOMException)?.name !== "AbortError") {
-        const msg =
-          typeof (window as any).showDirectoryPicker !== "function"
-            ? "Your browser does not support the File System Access API. Use Chrome or Edge."
-            : ((e as Error)?.message ?? "Failed to open folder/files");
-        setError(msg);
-      } else {
-        console.log("User cancelled file/folder selection.");
+        setError((e as Error)?.message ?? "Failed to open folder/files");
       }
     }
   };
@@ -156,8 +131,16 @@ export default function EdaPage() {
           new Set(gtData.vidToFrames[vid].map((f: any) => f.img)),
         );
         const sorted = uniqueFrames.sort((a, b) => {
-          const numA = parseInt(a.split("_")[1], 10);
-          const numB = parseInt(b.split("_")[1], 10);
+          const baseA = a.substring(0, a.lastIndexOf("."));
+          const baseB = b.substring(0, b.lastIndexOf("."));
+          const numA = parseInt(
+            baseA.substring(baseA.lastIndexOf("_") + 1),
+            10,
+          );
+          const numB = parseInt(
+            baseB.substring(baseB.lastIndexOf("_") + 1),
+            10,
+          );
           return numA - numB;
         });
         return {
@@ -174,67 +157,12 @@ export default function EdaPage() {
       setFrameIdx(0);
     } catch (e: unknown) {
       if ((e as DOMException)?.name !== "AbortError") {
-        const msg =
-          typeof (window as any).showOpenFilePicker !== "function"
-            ? "Your browser does not support the File System Access API. Use Chrome or Edge."
-            : ((e as Error)?.message ?? "Failed to open file");
-        setError(msg);
-      } else {
-        console.log("User cancelled file selection.");
+        setError((e as Error)?.message ?? "Failed to open file");
       }
     }
   };
 
   const video = videos[vidIdx];
-  const frame = video?.frames[frameIdx];
-  const total = video?.frames.length ?? 0;
-
-  const ann: FrameAnnotation = useMemo(() => {
-    if (!video || !frame) return DEFAULT_ANN;
-    return annotations[video.id]?.[frame] ?? DEFAULT_ANN;
-  }, [annotations, video, frame]);
-
-  const getFrameUrl = useCallback(
-    async (v: VideoEntry, frameName: string): Promise<string> => {
-      const key = `${v.id}/${frameName}`;
-      const cached = blobCache.current.get(key);
-      if (cached) return cached;
-      try {
-        const fileHandle = await v.dirHandle.getFileHandle(frameName);
-        const file = await fileHandle.getFile();
-        const url = URL.createObjectURL(file);
-        blobCache.current.set(key, url);
-        return url;
-      } catch {
-        return "";
-      }
-    },
-    [],
-  );
-
-  useEffect(() => {
-    if (!video || !frame) {
-      setFrameUrl("");
-      return;
-    }
-    let cancelled = false;
-    getFrameUrl(video, frame).then((url) => {
-      if (!cancelled) setFrameUrl(url);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [video, frame, getFrameUrl]);
-
-  useEffect(() => {
-    if (!video) return;
-    for (const d of [-1, 1]) {
-      const idx = frameIdx + d;
-      if (idx >= 0 && idx < video.frames.length) {
-        getFrameUrl(video, video.frames[idx]);
-      }
-    }
-  }, [frameIdx, video, getFrameUrl]);
 
   const goFrame = useCallback(
     (d: number) => {
@@ -255,31 +183,7 @@ export default function EdaPage() {
     [videos.length],
   );
 
-  useEffect(() => {
-    const h = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement).tagName === "INPUT") return;
-      switch (e.key) {
-        case "ArrowLeft":
-          e.preventDefault();
-          goFrame(-1);
-          break;
-        case "ArrowRight":
-          e.preventDefault();
-          goFrame(1);
-          break;
-        case "ArrowUp":
-          e.preventDefault();
-          goVideo(-1);
-          break;
-        case "ArrowDown":
-          e.preventDefault();
-          goVideo(1);
-          break;
-      }
-    };
-    window.addEventListener("keydown", h);
-    return () => window.removeEventListener("keydown", h);
-  }, [goFrame, goVideo]);
+  useKeyboardNav(goFrame, goVideo);
 
   useEffect(() => {
     const el = videoListRef.current?.querySelector("[data-active=true]");
@@ -304,228 +208,45 @@ export default function EdaPage() {
     [videos, annotations],
   );
 
-  // Landing screen: load images and (optionally) annotations
   if (!loaded) {
     return (
-      <div
-        className="h-screen flex flex-col items-center justify-center gap-10"
-        style={{ background: "var(--bg)", color: "var(--fg)" }}
-      >
-        <button
-          onClick={cycleTheme}
-          className="absolute top-4 right-4 w-8 h-8 flex items-center justify-center rounded-lg transition-colors"
-          style={{ background: "var(--surface)", color: "var(--fg-muted)" }}
-          title={`Theme: ${theme}`}
-        >
-          <ThemeIcon size={14} theme={theme} />
-        </button>
-        <div className="flex flex-col items-center gap-1.5">
-          <h1 className="text-5xl font-bold tracking-tighter">
-            <span className="opacity-40 mr-1">◆</span> EDA
-          </h1>
-          <p
-            className="text-[11px] uppercase tracking-[0.3em]"
-            style={{ color: "var(--fg-muted)" }}
-          >
-            Load Images and (Optionally) Annotations
-          </p>
-        </div>
-        <div className="flex flex-col items-center gap-4">
-          <Button
-            onClick={loadImages}
-            className="h-14 px-8 font-semibold rounded-lg text-sm"
-          >
-            {loaded ? "Reload Images" : "Load Images"}
-          </Button>
-          <Button
-            onClick={loadAnnotations}
-            className="h-14 px-8 font-semibold rounded-lg text-sm"
-            disabled={!loaded}
-          >
-            Load Annotations (Optional)
-          </Button>
-          {error && <div className="text-red-500 mt-2">{error}</div>}
-        </div>
-      </div>
+      <EdaLandingScreen
+        loadImages={loadImages}
+        loadAnnotations={loadAnnotations}
+        loaded={loaded}
+        error={error}
+        theme={theme}
+        cycleTheme={cycleTheme}
+      />
     );
   }
-
-  // Main viewer (same as app/page.tsx, but no model compare)
-  const infoRows = [
-    { label: "AVG", data: ann.avg, isAvg: true },
-    { label: "A1", data: ann.a1, isAvg: false },
-    { label: "A2", data: ann.a2, isAvg: false },
-    { label: "A3", data: ann.a3, isAvg: false },
-  ];
 
   return (
     <div
       className="h-screen flex flex-col select-none overflow-hidden"
       style={{ background: "var(--bg)", color: "var(--fg)" }}
     >
-      <header
-        className="h-11 shrink-0 flex items-center gap-4 px-4"
-        style={{ borderBottom: "1px solid var(--border)" }}
-      >
-        <span className="text-xs font-bold tracking-tight shrink-0 opacity-70 flex items-center gap-2">
-          ◆ EDA Viewer
-        </span>
-        <div className="h-5 w-px" style={{ background: "var(--border)" }} />
-        <span
-          className="text-[11px] font-mono truncate max-w-sm"
-          style={{ color: "var(--fg-muted)" }}
-          title={folderName}
-        >
-          {folderName}
-        </span>
-        <button
-          onClick={() => {
-            setLoaded(false);
-            setError("");
-          }}
-          className="h-7 px-3 text-[11px] rounded transition-colors flex items-center gap-1.5"
-          style={{ background: "var(--btn-bg)", color: "var(--fg-muted)" }}
-        >
-          <svg
-            width="12"
-            height="12"
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-            strokeWidth="2"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              d="M10 19l-7-7m0 0l7-7m-7 7h18"
-            />
-          </svg>
-          Back to Setup
-        </button>
-        <div className="ml-auto flex items-center gap-3">
-          <button
-            onClick={cycleTheme}
-            className="w-7 h-7 flex items-center justify-center rounded transition-colors"
-            style={{ background: "var(--btn-bg)", color: "var(--fg-muted)" }}
-            title={`Theme: ${theme}`}
-          >
-            <ThemeIcon size={13} theme={theme} />
-          </button>
-        </div>
-      </header>
+      <Header
+        title="EDA Viewer"
+        folderName={folderName}
+        theme={theme}
+        cycleTheme={cycleTheme}
+        onBack={() => {
+          setLoaded(false);
+          setError("");
+        }}
+      />
       <div className="flex-1 flex min-h-0">
-        <aside
-          className="w-56 shrink-0 flex flex-col"
-          style={{ borderRight: "1px solid var(--border)" }}
-        >
-          <div
-            className="h-8 flex items-center justify-between px-4 shrink-0"
-            style={{ borderBottom: "1px solid var(--border-subtle)" }}
-          >
-            <span
-              className="text-[10px] uppercase tracking-widest"
-              style={{ color: "var(--fg-muted)" }}
-            >
-              Videos
-            </span>
-            <span
-              className="text-[10px] tabular-nums"
-              style={{ color: "var(--fg-faint)" }}
-            >
-              {videos.length}
-            </span>
-          </div>
-          <div
-            className="flex items-center gap-3 px-4 py-1.5 shrink-0"
-            style={{ borderBottom: "1px solid var(--border-subtle)" }}
-          >
-            {CRITERIA.map((c, ci) => (
-              <div key={ci} className="flex items-center gap-1">
-                <div
-                  className="w-1.5 h-1.5 rounded-full"
-                  style={{ background: c.color }}
-                />
-                <span
-                  className="text-[9px]"
-                  style={{ color: "var(--fg-muted)" }}
-                >
-                  {c.label}
-                </span>
-              </div>
-            ))}
-          </div>
-          <div className="flex items-center gap-2 px-4 py-2">
-            <span className="text-xs font-semibold">Group by:</span>
-            <Button
-              className={`px-2 py-1 rounded ${groupMode === "video" ? "bg-blue-600 text-white" : "bg-gray-200"}`}
-              onClick={() => setGroupMode("video")}
-            >
-              Video
-            </Button>
-            <Button
-              className={`px-2 py-1 rounded ${groupMode === "all" ? "bg-blue-600 text-white" : "bg-gray-200"}`}
-              onClick={() => setGroupMode("all")}
-            >
-              All
-            </Button>
-          </div>
-          <div className="flex-1 overflow-y-auto" ref={videoListRef}>
-            {videos.map((v, i) => {
-              const active = i === vidIdx;
-              const st = stats[i];
-              return (
-                <button
-                  key={v.id}
-                  data-active={active}
-                  onClick={() => {
-                    setVidIdx(i);
-                    setFrameIdx(0);
-                  }}
-                  className="w-full text-left px-4 py-2 transition-colors border-l-2"
-                  style={{
-                    borderColor: active ? "var(--fg)" : "transparent",
-                    background: active ? "var(--surface)" : undefined,
-                  }}
-                >
-                  <div className="flex items-center gap-2">
-                    <span
-                      className="text-[11px] truncate flex-1 font-mono"
-                      style={{
-                        color: active ? "var(--fg)" : "var(--fg-muted)",
-                        fontWeight: active ? 500 : 400,
-                      }}
-                    >
-                      {v.name}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-1 mt-1.5">
-                    {CRITERIA.map((c, ci) => (
-                      <div
-                        key={ci}
-                        className="h-[3px] flex-1 rounded-full overflow-hidden"
-                        style={{ background: "var(--border-subtle)" }}
-                      >
-                        <div
-                          className="h-full rounded-full transition-all duration-300"
-                          style={{
-                            width: `${v.frames.length > 0 ? (st.counts[ci] / v.frames.length) * 100 : 0}%`,
-                            background: c.color,
-                          }}
-                        />
-                      </div>
-                    ))}
-                    <span
-                      className="text-[9px] ml-1 tabular-nums w-6 text-right shrink-0"
-                      style={{ color: "var(--fg-faint)" }}
-                    >
-                      {v.frames.length}
-                    </span>
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        </aside>
+        <EdaSidebar
+          videos={videos}
+          vidIdx={vidIdx}
+          setVidIdx={setVidIdx}
+          setFrameIdx={setFrameIdx}
+          groupMode={groupMode}
+          setGroupMode={setGroupMode}
+          stats={stats}
+          videoListRef={videoListRef}
+        />
         <main className="flex-1 flex flex-col min-w-0 min-h-0 overflow-y-auto">
           <div className="flex-1 flex flex-col items-center justify-start min-h-0 relative p-10">
             <h2 className="text-lg font-bold mb-4">

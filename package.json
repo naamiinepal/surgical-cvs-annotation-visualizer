@@ -9,8 +9,11 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.1",
     "@hugeicons/core-free-icons": "^4.0.0",
     "@hugeicons/react": "^1.1.6",
+    "@mui/material": "^7.3.9",
     "@mui/x-charts": "^8.28.0",
     "chart.js": "^4.5.1",
     "class-variance-authority": "^0.7.1",
